@@ -1,0 +1,9 @@
+# Nix build outputs
+result
+result-*
+# Packaged module artifacts
+*.lgx
+# Logs
+*.log
+# OS
+.DS_Store
