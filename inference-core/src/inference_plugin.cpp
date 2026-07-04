@@ -3,6 +3,7 @@
 #include "logos_api_client.h"
 #include "logos_object.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDebug>
 #include <QJsonArray>
@@ -285,51 +286,88 @@ QString InferencePlugin::room() { return m_room; }
 
 // ── Prompt ───────────────────────────────────────────────────────────
 
+// Reputation: this client's own experience with a provider, smoothed so a
+// provider with no history scores 0.5 (neutral) rather than 0 or 1. Local and
+// subjective by design — no gossip, no trust in other users' claims.
+double InferencePlugin::scoreOf(const ProviderRec& p)
+{
+    return (p.hits + 1.0) / (p.hits + p.misses + 2.0);
+}
+
 // Choose a provider from the verified roster: the preferred one if it's live
-// and not excluded, else the lowest-load live provider — but RANDOMLY among all
-// providers tied at that minimum load. The old "most recently heard" tiebreak
-// made every idle user pick the same provider (the one that announced last), so
-// N users herded onto one operator instead of spreading across the fleet. The
-// load signal is up to one announce-interval stale, so at scale many providers
-// read as load 0 at once; random tie-break is what actually distributes them.
+// and not excluded, else the best of (reputation bucket, then load, then
+// random). Reputation is bucketed to quarters — at low sample counts the
+// score is noisy, and fine-grained ranking would defeat the random tie-break
+// that spreads users across the fleet. A provider that answers reliably
+// climbs; one that eats prompts sinks; newcomers start neutral.
 const ProviderRec* InferencePlugin::pickProvider(QString& fpOut,
                                                  const QStringList& exclude) const
 {
     const qint64 cutoff = nowMs() - PROVIDER_LIVE_MS;
 
-    // Marketplace filter: a provider qualifies only if it serves the requested
-    // model (exact name match; "" = anything goes).
-    const auto servesFilter = [this](const ProviderRec& p) {
-        return m_modelFilter.isEmpty() || p.models.contains(m_modelFilter);
+    // Eligibility: live, not already tried, serves the model filter, and its
+    // access demand is one we can meet (pow up to 22 bits ≈ seconds of CPU;
+    // beyond that, decline to grind).
+    const auto eligible = [this, cutoff, &exclude](const QString& id, const ProviderRec& p) {
+        if (p.lastSeenMs < cutoff || exclude.contains(id)) return false;
+        if (!m_modelFilter.isEmpty() && !p.models.contains(m_modelFilter)) return false;
+        if (p.access == "pow" && p.powBits > 22) return false;
+        return true;
     };
 
     if (!m_preferredProvider.isEmpty() && !exclude.contains(m_preferredProvider)) {
         const auto it = m_providers.constFind(m_preferredProvider);
-        if (it != m_providers.constEnd() && it->lastSeenMs >= cutoff
-            && servesFilter(it.value())) {
+        if (it != m_providers.constEnd() && eligible(it.key(), it.value())) {
             fpOut = it.key();
             return &it.value();
         }
     }
 
-    // First pass: the minimum load among live, non-excluded providers.
-    int minLoad = INT_MAX;
+    // First pass: best (reputation bucket, min load) among eligible providers.
+    int bestBucket = -1, minLoad = INT_MAX;
     for (auto it = m_providers.constBegin(); it != m_providers.constEnd(); ++it) {
         const ProviderRec& p = it.value();
-        if (p.lastSeenMs < cutoff || exclude.contains(it.key()) || !servesFilter(p)) continue;
-        if (p.load < minLoad) minLoad = p.load;
+        if (!eligible(it.key(), p)) continue;
+        const int b = static_cast<int>(scoreOf(p) * 4);
+        if (b > bestBucket) { bestBucket = b; minLoad = p.load; }
+        else if (b == bestBucket && p.load < minLoad) minLoad = p.load;
     }
-    if (minLoad == INT_MAX) return nullptr;   // none available
+    if (bestBucket < 0) return nullptr;   // none available
 
-    // Second pass: collect everyone tied at minLoad, then pick one at random.
+    // Second pass: collect the ties, pick one at random (spreads the fleet).
     QStringList tied;
     for (auto it = m_providers.constBegin(); it != m_providers.constEnd(); ++it) {
         const ProviderRec& p = it.value();
-        if (p.lastSeenMs < cutoff || exclude.contains(it.key()) || !servesFilter(p)) continue;
-        if (p.load == minLoad) tied << it.key();
+        if (!eligible(it.key(), p)) continue;
+        if (static_cast<int>(scoreOf(p) * 4) == bestBucket && p.load == minLoad)
+            tied << it.key();
     }
     fpOut = tied.at(QRandomGenerator::global()->bounded(tied.size()));
     return &m_providers.constFind(fpOut).value();
+}
+
+// Hashcash stamp for providers that gate anonymous prompts: find a nonce so
+// SHA-256(promptId|providerId|nonce) has `bits` leading zero bits. ~50-300ms
+// at the default 18 bits; the iteration cap keeps a hostile difficulty from
+// hanging the client (picker already skips >22-bit providers).
+bool InferencePlugin::computePow(const QString& promptId, const QString& providerFp,
+                                 int bits, QString& nonceOut)
+{
+    const QByteArray prefix = (promptId + "|" + providerFp + "|").toUtf8();
+    for (quint64 n = 0; n < (quint64(1) << 26); ++n) {
+        const QByteArray nonce = QByteArray::number(n, 16);
+        const QByteArray d = QCryptographicHash::hash(prefix + nonce,
+                                                      QCryptographicHash::Sha256);
+        int zeros = 0;
+        for (const char cc : d) {
+            const unsigned char c = static_cast<unsigned char>(cc);
+            if (c == 0) { zeros += 8; continue; }
+            for (int b = 7; b >= 0 && !((c >> b) & 1); --b) ++zeros;
+            break;
+        }
+        if (zeros >= bits) { nonceOut = QString::fromLatin1(nonce); return true; }
+    }
+    return false;
 }
 
 // Put one attempt of `rec` on the wire — sealed to the next untried provider,
@@ -354,6 +392,22 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
         // only request one when the user filtered (the provider's default
         // otherwise). Rides inside the sealed box — the request stays private.
         if (!m_modelFilter.isEmpty()) inner["model"] = m_modelFilter;
+        // Credential seam: meet the provider's access demand. Today: a
+        // hashcash stamp; later: identity, voucher, RLN proof, LEZ note —
+        // all inside the sealed box, invisible to the network.
+        if (prov->access == "pow") {
+            QString nonce;
+            if (!computePow(rec.id, providerFp, prov->powBits, nonce)) {
+                qWarning() << "InferencePlugin: pow for" << providerFp
+                           << "(" << prov->powBits << "bits) not found — skipping provider";
+                rec.tried << providerFp;   // don't retry this one
+                return dispatchPrompt(rec);
+            }
+            QJsonObject cred;
+            cred["type"]  = "pow";
+            cred["nonce"] = nonce;
+            inner["cred"] = cred;
+        }
         const QByteArray sealed = InferenceIdentity::seal(
             prov->boxPk, QJsonDocument(inner).toJson(QJsonDocument::Compact));
         if (!sealed.isEmpty()) {
@@ -454,6 +508,13 @@ void InferencePlugin::sweepPending()
     for (PromptRec& p : m_prompts) {
         if (p.answered || p.failed) continue;
         if (now - p.lastSendMs < m_timeoutMs) continue;
+
+        // Reputation: whoever we asked ate this attempt without answering.
+        // (Plaintext broadcasts have no provider to charge.)
+        if (!p.provider.isEmpty()) {
+            const auto it = m_providers.find(p.provider);
+            if (it != m_providers.end()) ++it->misses;
+        }
 
         if (p.retries >= m_maxRetries) {
             // Mark failed but KEEP p.ephSks: a slow provider's sealed answer can
@@ -576,6 +637,8 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
     QStringList models;
     int         cap = 0;
     QString     price;
+    QString     access;
+    int         powBits = 0;
     if (v >= 3) {
         for (const QJsonValue& mv : obj.value("models").toArray())
             models << mv.toString();
@@ -583,7 +646,9 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         model = models.first();
         cap   = obj.value("cap").toInt();
         const QJsonObject priceObj = obj.value("price").toObject();
-        price = priceObj.value("scheme").toString();
+        price   = priceObj.value("scheme").toString();
+        access  = priceObj.value("access").toString("open");
+        powBits = priceObj.value("powbits").toInt();
         const QString priceJson = QString::fromUtf8(
             QJsonDocument(priceObj).toJson(QJsonDocument::Compact));
         const QByteArray canon3 =
@@ -633,8 +698,10 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         p.topic  = (v >= 3) ? providerTopic(id) : topicForRoom(m_room);
     }
     if (v >= 3) {
-        p.cap   = cap;
-        p.price = price;
+        p.cap     = cap;
+        p.price   = price;
+        p.access  = access;
+        p.powBits = powBits;
     }
     if (isNew) {
         qDebug() << "InferencePlugin: provider" << id << "joined roster ("
@@ -709,6 +776,12 @@ void InferencePlugin::handleResponse(const QJsonObject& obj)
         p.provider = answeredBy;
         p.model    = model;
         p.ephSks.clear();   // reply channel closed — keys no longer needed
+        // Reputation: an actual answer, verified by seal (and usually
+        // signature) — the only event that earns a hit.
+        {
+            const auto it = m_providers.find(answeredBy);
+            if (it != m_providers.end()) ++it->hits;
+        }
         qDebug() << "InferencePlugin: response for" << id << "from" << answeredBy
                  << (p.sealed ? "(sealed)" : "(plaintext)")
                  << "rtt" << p.rttMs << "ms" << "(" << p.text.size() << "chars )";
@@ -731,6 +804,10 @@ QString InferencePlugin::listProviders()
         o["cap"]    = it->cap;
         o["origin"] = it->origin;
         o["price"]  = it->price.isEmpty() ? "free" : it->price;
+        o["access"] = it->access.isEmpty() ? "open" : it->access;
+        o["hits"]   = it->hits;
+        o["misses"] = it->misses;
+        o["score"]  = scoreOf(it.value());
         o["ageMs"]  = static_cast<double>(now - it->lastSeenMs);
         o["live"]   = (now - it->lastSeenMs) < PROVIDER_LIVE_MS;
         arr.append(o);

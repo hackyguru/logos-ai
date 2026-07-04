@@ -7,6 +7,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 
 interface Provider {
   id: string; models: string[]; load: number; cap: number; price: string;
+  access?: string; powBits?: number;
   version: number; verified: boolean; live: boolean; ageMs: number;
   cardsHeard: number; firstSeenMs: number;
 }
@@ -283,6 +284,12 @@ export default function Home() {
                         {p.models.length > 0
                           ? p.models.map((m) => <span className="model-tag" key={m}>{m}</span>)
                           : <span style={{ color: "var(--text-muted)" }}>?</span>}
+                        {p.access === "pow" && (
+                          <span className="model-tag" style={{ background: "transparent", color: "var(--status-warning)" }}
+                                title={`anonymous prompts require a ${p.powBits ?? 18}-bit proof-of-work stamp`}>
+                            ⛏ pow
+                          </span>
+                        )}
                       </td>
                       <td style={{ whiteSpace: "nowrap", cursor: "help" }} title={VERIFY_TIP}>
                         {p.verified

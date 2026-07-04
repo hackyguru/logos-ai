@@ -523,6 +523,22 @@ Item {
                                 font.pixelSize: 12; color: "#555"
                                 elide: Text.ElideRight
                             }
+                            // My own experience with this provider (answers vs
+                            // timeouts) — shown once there is any history.
+                            Text {
+                                visible: (modelData.hits || 0) + (modelData.misses || 0) > 0
+                                text: Math.round((modelData.score || 0.5) * 100) + "%"
+                                font.pixelSize: 11
+                                color: (modelData.score || 0.5) >= 0.75 ? "#188038"
+                                       : (modelData.score || 0.5) >= 0.5 ? "#9a7700" : "#c5221f"
+                            }
+                            // Credential demand: ⛏ = anonymous prompts pay a
+                            // small proof-of-work stamp (computed automatically).
+                            Text {
+                                visible: modelData.access === "pow"
+                                text: "⛏"
+                                font.pixelSize: 11; color: "#9a7700"
+                            }
                             // Users only need to know if it can take a prompt NOW.
                             // Slot counts are operator telemetry — the auto-picker
                             // already weighs load internally.

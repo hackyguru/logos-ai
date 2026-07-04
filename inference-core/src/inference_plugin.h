@@ -52,9 +52,14 @@ struct ProviderRec {
     QString     topic;      // where to send prompts for this provider
     QString     origin;     // "room" | "discovery"
     QString     price;      // price scheme ("free" until LEZ payments land)
+    QString     access;     // credential demand: "open" | "pow" (more later)
+    int         powBits    = 0;   // hashcash difficulty when access == "pow"
     int         cap        = 0;   // concurrency capacity (v3; 0 = unknown)
     int         load       = 0;
     qint64      lastSeenMs = 0;
+    // Local reputation — this client's own experience, never from the wire.
+    int         hits       = 0;   // sealed answers received
+    int         misses     = 0;   // attempts that timed out unanswered
 };
 
 class InferencePlugin : public QObject, public InferenceInterface
@@ -105,6 +110,9 @@ private:
     void    handleAnnounce(const QJsonObject& obj);
     void    handleResponse(const QJsonObject& obj);
     const ProviderRec* pickProvider(QString& fpOut, const QStringList& exclude) const;
+    static double scoreOf(const ProviderRec& p);
+    static bool   computePow(const QString& promptId, const QString& providerFp,
+                             int bits, QString& nonceOut);
     bool    dispatchPrompt(PromptRec& rec);
     void    sweepPending();
     void    pruneHistory();

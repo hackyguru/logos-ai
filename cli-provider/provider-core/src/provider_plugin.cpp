@@ -3,6 +3,7 @@
 #include "logos_api_client.h"
 #include "logos_object.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDebug>
 #include <QElapsedTimer>
@@ -42,9 +43,45 @@ ProviderPlugin::ProviderPlugin(QObject* parent)
     // → default 4; set INFERENCE_MAX_INFLIGHT to tune.
     const int cap = qEnvironmentVariableIntValue("INFERENCE_MAX_INFLIGHT");
     m_maxInflight = cap > 0 ? cap : 4;
+
+    // Access policy — the credential seam. "open" (default) answers anyone;
+    // "pow" requires a hashcash stamp inside the sealed prompt, so anonymous
+    // users pay ~a CPU-second per request instead of being unlimited. Future
+    // credential types (identity tiers, vouchers, RLN proofs, LEZ notes) slot
+    // into the same `cred` field without another protocol change.
+    m_access = qEnvironmentVariable("INFERENCE_ACCESS", "open").trimmed().toLower();
+    if (m_access != "pow") m_access = "open";
+    const int bits = qEnvironmentVariableIntValue("INFERENCE_POW_BITS");
+    m_powBits = (bits >= 8 && bits <= 30) ? bits : 18;
+
     qDebug() << "ProviderPlugin: created, id =" << m_id
              << "model =" << m_model << "ollama =" << m_ollamaUrl
-             << "maxInflight =" << m_maxInflight;
+             << "maxInflight =" << m_maxInflight
+             << "access =" << m_access
+             << (m_access == "pow" ? QString("(%1 bits)").arg(m_powBits) : QString());
+}
+
+// Hashcash: leading zero bits of SHA-256(promptId|providerId|nonce) must meet
+// the advertised difficulty. Binding to promptId+providerId stops stamp reuse
+// across prompts or providers; verification is one hash.
+static int leadingZeroBits(const QByteArray& digest)
+{
+    int bits = 0;
+    for (const char cc : digest) {
+        const unsigned char c = static_cast<unsigned char>(cc);
+        if (c == 0) { bits += 8; continue; }
+        for (int b = 7; b >= 0 && !((c >> b) & 1); --b) ++bits;
+        break;
+    }
+    return bits;
+}
+
+bool ProviderPlugin::powValid(const QString& promptId, const QString& nonce) const
+{
+    if (nonce.isEmpty() || nonce.size() > 64) return false;
+    const QByteArray digest = QCryptographicHash::hash(
+        (promptId + "|" + m_id + "|" + nonce).toUtf8(), QCryptographicHash::Sha256);
+    return leadingZeroBits(digest) >= m_powBits;
 }
 
 ProviderPlugin::~ProviderPlugin() = default;
@@ -302,7 +339,12 @@ void ProviderPlugin::sendAnnounce()
 void ProviderPlugin::sendCard(const QString& signPk, const QString& boxPk, int load)
 {
     const qint64 ts = QDateTime::currentMSecsSinceEpoch();
+    // The price object is the economics/access seam — it rides inside the
+    // signed canon as opaque JSON, so adding keys here needs no protocol bump.
+    // (Serialization is alphabetical on every implementation we verify against.)
     QJsonObject price;
+    price["access"] = m_access;
+    if (m_access == "pow") price["powbits"] = m_powBits;
     price["scheme"] = "free";
     const QString priceJson = QString::fromUtf8(
         QJsonDocument(price).toJson(QJsonDocument::Compact));
@@ -437,8 +479,23 @@ void ProviderPlugin::handleMessageReceived(const QVariantList& data)
                      << reqModel << "we don't serve — using" << m_model;
             reqModel.clear();
         }
+        // Credential seam: enforce this node's access policy. Today the only
+        // credential type is a hashcash stamp; tomorrow's types (identity,
+        // voucher, RLN proof, LEZ note) validate here too.
+        if (m_access == "pow") {
+            const QJsonObject cred = innerDoc.object().value("cred").toObject();
+            if (cred.value("type").toString() != "pow" ||
+                !powValid(id, cred.value("nonce").toString())) {
+                qDebug() << "ProviderPlugin: prompt" << id
+                         << "has no valid pow stamp (" << m_powBits
+                         << "bits required) — declining";
+                return;
+            }
+        }
     } else {
         // v1 plaintext prompt (legacy UIs) — answered in plaintext as before.
+        // Plaintext carries no credential, so it's only served by open nodes.
+        if (m_access != "open") return;
         prompt    = obj.value("prompt").toString();
         fromLabel = obj.value("from").toString();
     }

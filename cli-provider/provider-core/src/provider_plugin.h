@@ -55,6 +55,7 @@ private:
     void    sendResponse(const QString& id, const QString& replyPkB64,
                          const QString& text, const QString& model,
                          const QString& topic);
+    bool    powValid(const QString& promptId, const QString& nonce) const;
     bool    invokeBool(const char* what, const QString& method,
                        const QVariant& arg = QVariant());
 
@@ -62,6 +63,8 @@ private:
     QString          m_room;
     QString          m_model;       // default ollama model (first of m_models)
     QStringList      m_models;      // all models served (INFERENCE_MODELS csv)
+    QString          m_access;      // "open" | "pow" (INFERENCE_ACCESS)
+    int              m_powBits = 18;  // hashcash difficulty (INFERENCE_POW_BITS)
     QString          m_ollamaUrl;   // OLLAMA_URL, default http://localhost:11434
     bool             m_started        = false;
     bool             m_createNodeDone = false;

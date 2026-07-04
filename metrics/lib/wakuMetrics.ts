@@ -32,6 +32,8 @@ export interface ProviderCard {
   load: number;
   cap: number;
   price: string;
+  access: string;
+  powBits: number;
   version: number;
   verified: boolean;
   firstSeenMs: number;
@@ -147,6 +149,10 @@ function handleCard(payloadUtf8: string): void {
     cap: Number(o.cap ?? 0),
     price: typeof o.price === "object" && o.price
       ? String((o.price as Record<string, unknown>).scheme ?? "free") : "free",
+    access: typeof o.price === "object" && o.price
+      ? String((o.price as Record<string, unknown>).access ?? "open") : "open",
+    powBits: typeof o.price === "object" && o.price
+      ? Number((o.price as Record<string, unknown>).powbits ?? 0) : 0,
     version: Number(o.v ?? 0),
     verified,
     firstSeenMs: prev?.firstSeenMs ?? now,
