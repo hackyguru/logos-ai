@@ -75,6 +75,10 @@ public:
     // registry can later feed the same list.
     Q_INVOKABLE virtual bool    setTrustedOnly(bool enabled) = 0;
     Q_INVOKABLE virtual bool    setTrusted(const QString& fingerprint, bool trusted) = 0;
+    // Canary-audit a provider: send an objective trap question requesting its
+    // advertised model and grade the answer, exposing model substitution.
+    // Runs automatically on first sight of a capable provider; also manual.
+    Q_INVOKABLE virtual bool    auditProvider(const QString& fingerprint) = 0;
 };
 
 #define InferenceInterface_iid "org.logos.InferenceInterface"

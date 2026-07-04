@@ -543,6 +543,24 @@ Item {
                                 font.pixelSize: 12; color: "#555"
                                 elide: Text.ElideRight
                             }
+                            // Integrity: did a canary audit confirm the advertised
+                            // model? ✓ verified · ✗ FAILED (caught substituting a
+                            // weaker model) · (nothing) if not yet audited.
+                            Text {
+                                visible: modelData.integrity === "verified"
+                                         || modelData.integrity === "failed"
+                                         || modelData.integrity === "mixed"
+                                text: modelData.integrity === "verified" ? "✓"
+                                      : modelData.integrity === "mixed" ? "⚠" : "✗ fake"
+                                font.pixelSize: 11
+                                color: modelData.integrity === "verified" ? "#188038"
+                                       : modelData.integrity === "mixed" ? "#9a7700" : "#c5221f"
+                                MouseArea {
+                                    anchors.fill: parent; anchors.margins: -4
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: { callInf("auditProvider", [modelData.id]); refresh() }
+                                }
+                            }
                             // My own experience with this provider (answers vs
                             // timeouts) — shown once there is any history.
                             Text {

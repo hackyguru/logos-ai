@@ -14,6 +14,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QUuid>
 
 #include <climits>
@@ -378,6 +379,7 @@ const ProviderRec* InferencePlugin::pickProvider(QString& fpOut,
     const auto eligible = [this, cutoff, &exclude](const QString& id, const ProviderRec& p) {
         if (p.lastSeenMs < cutoff || exclude.contains(id)) return false;
         if (m_trustedOnly && !m_trusted.contains(id)) return false;   // whitelist
+        if (p.audits > 0 && p.auditsPassed == 0) return false;        // failed audit
         if (!m_modelFilter.isEmpty() && !p.models.contains(m_modelFilter)) return false;
         if (p.access == "pow" && p.powBits > 22) return false;
         return true;
@@ -438,6 +440,79 @@ bool InferencePlugin::computePow(const QString& promptId, const QString& provide
     return false;
 }
 
+// ── Canary auditing ──────────────────────────────────────────────────
+// The real defense against model substitution (advertise qwen3:8b, secretly
+// run tinyllama): a small bank of OBJECTIVE questions any competent model
+// answers correctly and toy models fail. An audit is a normal sealed prompt
+// requesting the advertised model — the provider can't tell it from real
+// traffic (prompts are E2E-sealed under ephemeral keys), so it can't behave
+// only when watched. A wrong answer is provable: the delivered model isn't
+// what was promised. Calibrated live against qwen3:8b vs tinyllama.
+struct Canary { const char* q; const char* expect; };
+static const Canary CANARIES[] = {
+    { "What is 47 * 23? Reply with only the number.", "1081" },
+    { "What is the square root of 1764? Reply with only the number.", "42" },
+    { "What is 15% of 240? Reply with only the number.", "36" },
+    { "What is the chemical symbol for tungsten? Reply with only the symbol.", "W" },
+    { "What is 128 + 256? Reply with only the number.", "384" },
+    { "How many sides does a hexagon have? Reply with only the number.", "6" },
+};
+
+// Only audit providers whose advertised model should ace objective questions.
+// Toy models (tinyllama, sub-3B) legitimately fail these, so auditing them
+// would punish honest advertising — skip them.
+static bool modelLikelyCapable(const QString& modelIn)
+{
+    const QString m = modelIn.toLower();
+    if (m.contains("tiny")) return false;
+    QRegularExpression re("([0-9]+(?:\\.[0-9]+)?)b");
+    auto it = re.globalMatch(m);
+    double sz = -1;
+    while (it.hasNext()) sz = qMax(sz, it.next().captured(1).toDouble());
+    return !(sz > 0 && sz < 3);   // <3B ⇒ toy; unknown size ⇒ assume capable
+}
+
+// Grade a canary answer: does the model's reply contain the expected token?
+// Case-insensitive, punctuation-tolerant (models wrap short answers in prose
+// even when told not to; the discriminator is whether the right token appears
+// at all — capable models include it, substituted toys don't).
+static bool canaryPasses(const QString& expect, const QString& answer)
+{
+    const QString a = answer.toLower();
+    const QString e = expect.toLower();
+    // Word/number boundary so "6" doesn't match "16" and "w" doesn't match "who".
+    QRegularExpression re("(^|[^a-z0-9])" + QRegularExpression::escape(e) + "([^a-z0-9]|$)");
+    return re.match(a).hasMatch();
+}
+
+// Fire one audit at a specific provider (does nothing if it's not live or its
+// model isn't auditable). Manual trigger + auto-on-first-sight both call this.
+bool InferencePlugin::auditProvider(const QString& fingerprint)
+{
+    const auto it = m_providers.find(fingerprint);
+    if (it == m_providers.end()) return false;
+    if (!modelLikelyCapable(it->model)) return false;
+    if (!m_started && !startDelivery()) return false;
+
+    const Canary& c = CANARIES[QRandomGenerator::global()->bounded(
+        int(sizeof(CANARIES) / sizeof(CANARIES[0])))];
+    PromptRec rec;
+    rec.id       = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    rec.prompt   = QString::fromUtf8(c.q);
+    rec.sentMs   = nowMs();
+    rec.canary   = true;
+    rec.expect   = QString::fromUtf8(c.expect);
+    rec.pin      = fingerprint;        // audit THIS provider, not the picker's choice
+    rec.reqModel = it->model;          // demand the advertised model
+    it->lastAuditMs = nowMs();
+
+    if (!dispatchPrompt(rec)) return false;
+    m_prompts.prepend(rec);
+    pruneHistory();
+    qDebug() << "InferencePlugin: auditing" << fingerprint << "with canary" << rec.id;
+    return true;
+}
+
 // Put one attempt of `rec` on the wire — sealed to the next untried provider,
 // or plaintext when none is available and plaintext is allowed. Shared by
 // sendPrompt (first attempt) and sweepPending (retries).
@@ -450,7 +525,20 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
     rec.sealed = false;
     QString sendTopic = topicForRoom(m_room);   // plaintext fallback stays in-room
     QString providerFp;
-    const ProviderRec* prov = pickProvider(providerFp, rec.tried);
+    const ProviderRec* prov = nullptr;
+    // Canary audits (and any pinned send) target one specific provider rather
+    // than the auto-picker, so we test exactly who we mean to test.
+    if (!rec.pin.isEmpty()) {
+        const auto it = m_providers.constFind(rec.pin);
+        const qint64 cutoff = nowMs() - PROVIDER_LIVE_MS;
+        if (it != m_providers.constEnd() && it->lastSeenMs >= cutoff
+            && !rec.tried.contains(rec.pin)) {
+            prov = &it.value();
+            providerFp = rec.pin;
+        }
+    } else {
+        prov = pickProvider(providerFp, rec.tried);
+    }
     QByteArray ephSk, ephPk;
     if (prov && InferenceIdentity::genEphemeralKeypair(ephSk, ephPk)) {
         QJsonObject inner;
@@ -459,7 +547,8 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
         // Multi-model marketplace providers run whichever model we ask for;
         // only request one when the user filtered (the provider's default
         // otherwise). Rides inside the sealed box — the request stays private.
-        if (!m_modelFilter.isEmpty()) inner["model"] = m_modelFilter;
+        const QString wantModel = !rec.reqModel.isEmpty() ? rec.reqModel : m_modelFilter;
+        if (!wantModel.isEmpty()) inner["model"] = wantModel;
         // Credential seam: meet the provider's access demand. Today: a
         // hashcash stamp; later: identity, voucher, RLN proof, LEZ note —
         // all inside the sealed box, invisible to the network.
@@ -609,6 +698,7 @@ QString InferencePlugin::listExchanges()
     QJsonArray arr;
     const qint64 now = nowMs();
     for (const PromptRec& p : m_prompts) {
+        if (p.canary) continue;   // audits are internal, not user prompts
         QJsonObject o;
         o["id"]       = p.id;
         o["prompt"]   = p.prompt;
@@ -775,6 +865,13 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         qDebug() << "InferencePlugin: provider" << id << "joined roster ("
                  << models.join(',') << "," << p.origin << ")";
         emit eventResponse("providersChanged", QVariantList{ m_providers.size() });
+        // First sight of a capable provider → audit it once so its integrity is
+        // known before it earns much traffic. Deferred a few seconds so the
+        // roster (and any pow bits) has settled. Auto-audit is opt-outable.
+        if (m_autoAudit && modelLikelyCapable(model)) {
+            const QString fp = id;
+            QTimer::singleShot(4000, this, [this, fp]() { auditProvider(fp); });
+        }
     }
 }
 
@@ -844,11 +941,25 @@ void InferencePlugin::handleResponse(const QJsonObject& obj)
         p.provider = answeredBy;
         p.model    = model;
         p.ephSks.clear();   // reply channel closed — keys no longer needed
-        // Reputation: an actual answer, verified by seal (and usually
-        // signature) — the only event that earns a hit.
+        // Reputation + integrity. A sealed answer earns a hit either way (they
+        // responded). If this was a canary, also grade it: a right answer
+        // confirms the advertised model, a wrong one is proof of substitution.
         {
             const auto it = m_providers.find(answeredBy);
-            if (it != m_providers.end()) ++it->hits;
+            if (it != m_providers.end()) {
+                ++it->hits;
+                if (p.canary) {
+                    ++it->audits;
+                    const bool ok = canaryPasses(p.expect, text);
+                    if (ok) ++it->auditsPassed;
+                    qWarning().noquote() << "InferencePlugin: audit of" << answeredBy
+                        << (ok ? "PASSED" : "FAILED")
+                        << "— canary expected" << p.expect << ", got:"
+                        << text.left(60);
+                    emit eventResponse("auditResult",
+                        QVariantList{ answeredBy, ok });
+                }
+            }
         }
         qDebug() << "InferencePlugin: response for" << id << "from" << answeredBy
                  << (p.sealed ? "(sealed)" : "(plaintext)")
@@ -873,7 +984,13 @@ QString InferencePlugin::listProviders()
         o["origin"] = it->origin;
         o["price"]  = it->price.isEmpty() ? "free" : it->price;
         o["access"] = it->access.isEmpty() ? "open" : it->access;
-        o["trusted"] = m_trusted.contains(it.key());
+        o["trusted"]      = m_trusted.contains(it.key());
+        o["audits"]       = it->audits;
+        o["auditsPassed"] = it->auditsPassed;
+        o["integrity"]    = it->audits == 0 ? QStringLiteral("unknown")
+                          : it->auditsPassed == it->audits ? QStringLiteral("verified")
+                          : it->auditsPassed == 0 ? QStringLiteral("failed")
+                          : QStringLiteral("mixed");
         o["hits"]   = it->hits;
         o["misses"] = it->misses;
         o["score"]  = scoreOf(it.value());

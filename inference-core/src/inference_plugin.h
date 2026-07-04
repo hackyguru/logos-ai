@@ -38,6 +38,12 @@ struct PromptRec {
     int     retries    = 0;
     bool    failed     = false;
     qint64  lastSendMs = 0;
+    // Canary audit: a trap prompt aimed at one provider (pin) requesting a
+    // specific model (reqModel), graded against expect. Hidden from the UI.
+    bool    canary     = false;
+    QString expect;
+    QString pin;
+    QString reqModel;
 };
 
 // A provider we've heard a (signature-verified) announce from — either in the
@@ -60,6 +66,10 @@ struct ProviderRec {
     // Local reputation — this client's own experience, never from the wire.
     int         hits       = 0;   // sealed answers received
     int         misses     = 0;   // attempts that timed out unanswered
+    // Integrity: canary audits of "did you run the model you advertised".
+    int         audits       = 0;
+    int         auditsPassed = 0;
+    qint64      lastAuditMs   = 0;
 };
 
 class InferencePlugin : public QObject, public InferenceInterface
@@ -101,6 +111,7 @@ public:
     Q_INVOKABLE bool    setModelFilter(const QString& model) override;
     Q_INVOKABLE bool    setTrustedOnly(bool enabled) override;
     Q_INVOKABLE bool    setTrusted(const QString& fingerprint, bool trusted) override;
+    Q_INVOKABLE bool    auditProvider(const QString& fingerprint) override;
 
 signals:
     void eventResponse(const QString& eventName, const QVariantList& args);
@@ -135,6 +146,7 @@ private:
     QString           m_modelFilter;           // "" = any model
     QSet<QString>     m_trusted;               // provider whitelist (🛡)
     bool              m_trustedOnly = false;   // enforce the whitelist
+    bool              m_autoAudit   = true;    // canary-audit new capable providers
     bool              m_requireEncryption = false;
     qint64            m_timeoutMs = 90000;     // INFERENCE_TIMEOUT_MS override
     int               m_maxRetries = 2;
