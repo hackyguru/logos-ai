@@ -5,3 +5,5 @@ modules/
 
 # Oracle instance state (deploy/)
 deploy/.instance.env
+# Oracle instance state (any variant)
+deploy/.instance*.env
