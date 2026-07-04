@@ -31,8 +31,9 @@ function ago(ms: number): string {
 }
 
 const VERIFY_TIP =
-  "a provider is live if a signed capability card arrived in the last 90s · " +
-  "cards verified against Ed25519 identity (fingerprint = SHA-256 of signing key)";
+  "a provider is live if a signed announcement arrived in the last 90s · " +
+  "announcements are verified against the provider's Ed25519 identity " +
+  "(fingerprint = SHA-256 of signing key)";
 
 // Single-series sparkline (active providers over ~15 min). One series → no
 // legend; the tile label names it. Recessive: no axes, a thin line over a
@@ -232,7 +233,7 @@ export default function Home() {
           </Tile>
           <Tile label="Models" value={s?.modelsOffered ?? "—"} sub="live, distinct" />
           <Tile label="Open slots" value={s?.openSlots ?? "—"} sub="network-wide" />
-          <Tile label="Cards / min" value={s?.cardsPerMin ?? "—"}
+          <Tile label="Announcements / min" value={s?.cardsPerMin ?? "—"}
                 sub={s?.lastCardAgoMs != null ? `last ${ago(s.lastCardAgoMs)}` : "listening…"} />
         </section>
 
@@ -263,9 +264,9 @@ export default function Home() {
               <table>
                 <thead>
                   <tr>
-                    <th>provider</th><th>models</th><th>card</th>
+                    <th>provider</th><th>models</th><th>signature</th>
                     <th className="num">slots</th><th className="num">last seen</th>
-                    <th className="num">cards</th>
+                    <th className="num">heard</th>
                   </tr>
                 </thead>
                 <tbody>
