@@ -20,6 +20,8 @@ Item {
     property bool   requireEncryption: false
     property string preferredProvider: ""   // "" = auto
     property string modelFilter: ""         // "" = any model
+    property bool   trustedOnly: false      // whitelist enforcement
+    property int    trustedCount: 0
 
     // ── Logos bridge helpers ─────────────────────────────────────────
 
@@ -77,6 +79,8 @@ Item {
             requireEncryption = !!st.requireEncryption
             preferredProvider = st.preferredProvider || ""
             modelFilter       = st.modelFilter || ""
+            trustedOnly       = !!st.trustedOnly
+            trustedCount      = st.trustedCount || 0
         } catch (e) { /* keep previous state */ }
     }
 
@@ -118,11 +122,13 @@ Item {
         return null
     }
 
-    // Providers a prompt could go to right now (live + serving the model filter).
+    // Providers a prompt could go to right now (live, serving the model
+    // filter, and — when Trusted only is on — whitelisted).
     function eligibleProviders() {
         var n = 0
         for (var i = 0; i < providers.length; i++)
-            if (providers[i].live && providerServes(providers[i], modelFilter)) n++
+            if (providers[i].live && providerServes(providers[i], modelFilter)
+                && (!trustedOnly || providers[i].trusted)) n++
         return n
     }
 
@@ -134,9 +140,13 @@ Item {
                    + (modelFilter ? " running " + modelFilter : (p ? " (" + (p.model || "?") + ")" : ""))
         }
         var n = eligibleProviders()
-        if (n === 0) return modelFilter
-            ? "⚠ no live provider serves " + modelFilter + " — prompts will wait/fail"
-            : "⚠ no live providers yet — listening for capability cards…"
+        if (n === 0) {
+            if (trustedOnly && trustedCount === 0)
+                return "⚠ Trusted only is on but nothing is trusted — click 🛡 on a provider"
+            return modelFilter
+                ? "⚠ no live provider serves " + modelFilter + " — prompts will wait/fail"
+                : "⚠ no live providers yet — listening for capability cards…"
+        }
         return "Auto: best of " + n + " available provider(s)"
                + (modelFilter ? " serving " + modelFilter : "")
     }
@@ -441,6 +451,15 @@ Item {
                             refreshIdentity()
                         }
                     }
+                    CheckBox {
+                        text: "Trusted 🛡"
+                        checked: trustedOnly
+                        font.pixelSize: 12
+                        onToggled: {
+                            callInf("setTrustedOnly", [checked])
+                            refreshIdentity()
+                        }
+                    }
                 }
                 Text {
                     Layout.fillWidth: true
@@ -490,6 +509,7 @@ Item {
                         property bool pinned: modelData.id === preferredProvider
                         property bool eligible: modelData.live
                                                 && providerServes(modelData, modelFilter)
+                                                && (!trustedOnly || modelData.trusted)
                         width: ListView.view.width
                         height: 28
                         radius: 4
@@ -551,6 +571,22 @@ Item {
                             Text {
                                 text: modelData.price || "free"
                                 font.pixelSize: 11; color: "#888"
+                            }
+                            // Whitelist toggle — independent of the pin click.
+                            Text {
+                                text: "🛡"
+                                font.pixelSize: 12
+                                opacity: modelData.trusted ? 1.0 : 0.25
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -4
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        callInf("setTrusted",
+                                                [modelData.id, !modelData.trusted])
+                                        refresh()
+                                    }
+                                }
                             }
                         }
                         MouseArea {

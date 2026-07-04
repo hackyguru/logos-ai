@@ -34,6 +34,12 @@ InferencePlugin::InferencePlugin(QObject* parent)
 {
     const qint64 t = qEnvironmentVariableIntValue("INFERENCE_TIMEOUT_MS");
     if (t > 0) m_timeoutMs = t;
+    // Provider whitelist, seedable for headless/scripted setups. The UI edits
+    // it at runtime; env gives it a durable default.
+    for (const QString& fp : qEnvironmentVariable("INFERENCE_TRUSTED")
+                                 .split(',', Qt::SkipEmptyParts))
+        m_trusted.insert(fp.trimmed());
+    m_trustedOnly = qEnvironmentVariableIntValue("INFERENCE_TRUSTED_ONLY") > 0;
     qDebug() << "InferencePlugin: created, myId =" << m_myId
              << "timeoutMs =" << m_timeoutMs;
 }
@@ -70,6 +76,8 @@ QString InferencePlugin::identityStatus()
     o["requireEncryption"] = m_requireEncryption;
     o["preferredProvider"] = m_preferredProvider;
     o["modelFilter"]       = m_modelFilter;
+    o["trustedOnly"]       = m_trustedOnly;
+    o["trustedCount"]      = m_trusted.size();
     return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
 }
 
@@ -101,6 +109,22 @@ bool InferencePlugin::setModelFilter(const QString& model)
     m_modelFilter = model.trimmed();
     qDebug() << "InferencePlugin: modelFilter ="
              << (m_modelFilter.isEmpty() ? "(any)" : m_modelFilter);
+    return true;
+}
+
+bool InferencePlugin::setTrustedOnly(bool enabled)
+{
+    m_trustedOnly = enabled;
+    qDebug() << "InferencePlugin: trustedOnly =" << enabled
+             << "(" << m_trusted.size() << "trusted )";
+    return true;
+}
+
+bool InferencePlugin::setTrusted(const QString& fingerprint, bool trusted)
+{
+    const QString fp = fingerprint.trimmed();
+    if (fp.isEmpty()) return false;
+    if (trusted) m_trusted.insert(fp); else m_trusted.remove(fp);
     return true;
 }
 
@@ -310,6 +334,7 @@ const ProviderRec* InferencePlugin::pickProvider(QString& fpOut,
     // beyond that, decline to grind).
     const auto eligible = [this, cutoff, &exclude](const QString& id, const ProviderRec& p) {
         if (p.lastSeenMs < cutoff || exclude.contains(id)) return false;
+        if (m_trustedOnly && !m_trusted.contains(id)) return false;   // whitelist
         if (!m_modelFilter.isEmpty() && !p.models.contains(m_modelFilter)) return false;
         if (p.access == "pow" && p.powBits > 22) return false;
         return true;
@@ -805,6 +830,7 @@ QString InferencePlugin::listProviders()
         o["origin"] = it->origin;
         o["price"]  = it->price.isEmpty() ? "free" : it->price;
         o["access"] = it->access.isEmpty() ? "open" : it->access;
+        o["trusted"] = m_trusted.contains(it.key());
         o["hits"]   = it->hits;
         o["misses"] = it->misses;
         o["score"]  = scoreOf(it.value());

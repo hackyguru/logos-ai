@@ -99,6 +99,8 @@ public:
     Q_INVOKABLE bool    setRequireEncryption(bool required) override;
     Q_INVOKABLE bool    setPreferredProvider(const QString& fingerprint) override;
     Q_INVOKABLE bool    setModelFilter(const QString& model) override;
+    Q_INVOKABLE bool    setTrustedOnly(bool enabled) override;
+    Q_INVOKABLE bool    setTrusted(const QString& fingerprint, bool trusted) override;
 
 signals:
     void eventResponse(const QString& eventName, const QVariantList& args);
@@ -128,6 +130,8 @@ private:
     QSet<QString>     m_sessionSubs;           // provider session topics we joined
     QString           m_preferredProvider;     // "" = auto (least loaded)
     QString           m_modelFilter;           // "" = any model
+    QSet<QString>     m_trusted;               // provider whitelist (🛡)
+    bool              m_trustedOnly = false;   // enforce the whitelist
     bool              m_requireEncryption = false;
     qint64            m_timeoutMs = 90000;     // INFERENCE_TIMEOUT_MS override
     int               m_maxRetries = 2;

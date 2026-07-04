@@ -69,6 +69,12 @@ public:
     // ("" = any). Sealed prompts also carry the request so multi-model
     // providers run the right one.
     Q_INVOKABLE virtual bool    setModelFilter(const QString& model) = 0;
+    // Provider whitelist: mark a provider trusted (🛡) and, with trustedOnly,
+    // route prompts exclusively to trusted fingerprints. The interim trust
+    // mechanism until reputation gossip / staking exists; a curated signed
+    // registry can later feed the same list.
+    Q_INVOKABLE virtual bool    setTrustedOnly(bool enabled) = 0;
+    Q_INVOKABLE virtual bool    setTrusted(const QString& fingerprint, bool trusted) = 0;
 };
 
 #define InferenceInterface_iid "org.logos.InferenceInterface"
