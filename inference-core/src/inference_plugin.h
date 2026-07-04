@@ -113,6 +113,9 @@ private:
     void    handleResponse(const QJsonObject& obj);
     const ProviderRec* pickProvider(QString& fpOut, const QStringList& exclude) const;
     static double scoreOf(const ProviderRec& p);
+    static QString trustFilePath();
+    void    loadTrust();
+    void    saveTrust() const;
     static bool   computePow(const QString& promptId, const QString& providerFp,
                              int bits, QString& nonceOut);
     bool    dispatchPrompt(PromptRec& rec);

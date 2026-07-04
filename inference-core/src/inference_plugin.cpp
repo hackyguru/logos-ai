@@ -5,6 +5,9 @@
 
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -40,6 +43,7 @@ InferencePlugin::InferencePlugin(QObject* parent)
                                  .split(',', Qt::SkipEmptyParts))
         m_trusted.insert(fp.trimmed());
     m_trustedOnly = qEnvironmentVariableIntValue("INFERENCE_TRUSTED_ONLY") > 0;
+    loadTrust();
     qDebug() << "InferencePlugin: created, myId =" << m_myId
              << "timeoutMs =" << m_timeoutMs;
 }
@@ -112,9 +116,47 @@ bool InferencePlugin::setModelFilter(const QString& model)
     return true;
 }
 
+// The whitelist survives restarts in the same directory as the identity key
+// (~/.logos-inference, or LOGOS_IDENTITY_DIR). Env vars seed additively.
+QString InferencePlugin::trustFilePath()
+{
+    QString dir = qEnvironmentVariable("LOGOS_IDENTITY_DIR");
+    if (dir.isEmpty()) dir = QDir::homePath() + "/.logos-inference";
+    return dir + "/trusted-providers.json";
+}
+
+void InferencePlugin::loadTrust()
+{
+    QFile f(trustFilePath());
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonDocument d = QJsonDocument::fromJson(f.readAll());
+    if (!d.isObject()) return;
+    for (const QJsonValue& v : d.object().value("trusted").toArray())
+        if (!v.toString().isEmpty()) m_trusted.insert(v.toString());
+    if (d.object().contains("trustedOnly"))
+        m_trustedOnly = d.object().value("trustedOnly").toBool();
+    qDebug() << "InferencePlugin: trust list loaded —" << m_trusted.size()
+             << "provider(s), trustedOnly =" << m_trustedOnly;
+}
+
+void InferencePlugin::saveTrust() const
+{
+    QDir().mkpath(QFileInfo(trustFilePath()).path());
+    QFile f(trustFilePath());
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning() << "InferencePlugin: cannot write" << trustFilePath();
+        return;
+    }
+    QJsonObject o;
+    o["trusted"]     = QJsonArray::fromStringList(QStringList(m_trusted.values()));
+    o["trustedOnly"] = m_trustedOnly;
+    f.write(QJsonDocument(o).toJson(QJsonDocument::Indented));
+}
+
 bool InferencePlugin::setTrustedOnly(bool enabled)
 {
     m_trustedOnly = enabled;
+    saveTrust();
     qDebug() << "InferencePlugin: trustedOnly =" << enabled
              << "(" << m_trusted.size() << "trusted )";
     return true;
@@ -125,6 +167,7 @@ bool InferencePlugin::setTrusted(const QString& fingerprint, bool trusted)
     const QString fp = fingerprint.trimmed();
     if (fp.isEmpty()) return false;
     if (trusted) m_trusted.insert(fp); else m_trusted.remove(fp);
+    saveTrust();
     return true;
 }
 
