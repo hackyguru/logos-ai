@@ -83,7 +83,6 @@ export default function Home() {
   }, []);
 
   const s = snap?.stats;
-  const netUp = !!snap?.connected;
 
   return (
     <div className={`${geistSans.className} ${geistMono.className} viz-root min-h-screen font-sans`}>
@@ -135,17 +134,7 @@ export default function Home() {
 
       <main className="mx-auto max-w-5xl px-6 py-10">
         <header className="mb-8">
-          <div className="flex items-baseline gap-3 flex-wrap">
-            <h1 className="text-2xl font-semibold">Inference Network</h1>
-            <span style={{ color: netUp ? "var(--status-good)" : "var(--status-warning)", fontSize: 13 }}>
-              {netUp ? `● connected — ${snap?.peerCount} waku peer(s)` : "◌ connecting to waku…"}
-            </span>
-          </div>
-          <p style={{ color: "var(--text-muted)", fontSize: 12 }} className="mt-1">
-            live from <span className="mono">{snap?.contentTopic ?? "/inference/1/discovery/json"}</span>
-            {" "}· cluster {snap?.cluster ?? 2} · default room <span className="mono">agora</span>
-            {" "}· js-waku (server-side, TCP)
-          </p>
+          <h1 className="text-2xl font-semibold">Inference Network</h1>
           {(snap?.error || fetchErr) && (
             <p style={{ color: "var(--status-serious)", fontSize: 12 }} className="mt-2">
               ⚠ {snap?.error ?? fetchErr}
@@ -210,7 +199,8 @@ export default function Home() {
                     <td className="mono" title={p.id}>{p.id.slice(0, 16)}…</td>
                     <td className="mono">{p.models.join(", ") || "?"}</td>
                     <td>{p.price}</td>
-                    <td style={{ whiteSpace: "nowrap" }}>
+                    <td style={{ whiteSpace: "nowrap", cursor: "help" }}
+                        title="a provider is live if a signed capability card arrived in the last 90s · cards verified against Ed25519 identity (fingerprint = SHA-256 of signing key)">
                       {p.verified
                         ? <span style={{ color: "var(--status-good)" }}>✓ signed</span>
                         : <span style={{ color: "var(--status-warning)" }}>⚠ unverified</span>}
@@ -229,10 +219,6 @@ export default function Home() {
               </tbody>
             </table>
           </div>
-          <p style={{ color: "var(--text-muted)", fontSize: 11 }} className="mt-2">
-            a provider is <b>live</b> if a signed capability card arrived in the last 90s ·
-            cards verified against Ed25519 identity (fingerprint = SHA-256 of signing key)
-          </p>
         </section>
       </main>
     </div>
