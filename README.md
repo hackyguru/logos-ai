@@ -49,9 +49,13 @@ the architecture is identical (see [part11-core-ping-pong](../part11-core-ping-p
   `ollama` (via `curl $OLLAMA_URL/api/generate`, async) and publishes the
   answer on the topic the prompt arrived on. `INFERENCE_MODELS=a,b,c`
   advertises multiple models; sealed prompts may request any of them.
-- **Economics seam:** every v3 card carries a `price` object —
-  `{"scheme":"free"}` today. When LEZ private payments land, the scheme and
-  terms slot in here (the card signature already covers them).
+- **Economics seam:** every v3 card carries a signed `price` object with
+  `scheme` (`free`/`lez`), `amount`, `unit` (`request`/`1ktokens`) and `asset`.
+  All amounts are **0 (free)** today — providers advertise pricing, users pick
+  and the auto-picker prefers cheaper, but nothing is charged. When LEZ private
+  payments land, providers set a nonzero `amount`+`asset` and the client
+  attaches a `lez-note` credential (same sealed-prompt `cred` slot the PoW
+  stamp uses) — no protocol change, the card signature already covers it.
 
 See **[docs/BRIEF.md](docs/BRIEF.md)** for the design + message protocol and
 **[docs/RUN.md](docs/RUN.md)** to build, install, and run it end to end.

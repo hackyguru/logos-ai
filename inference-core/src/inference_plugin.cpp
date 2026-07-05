@@ -385,6 +385,11 @@ const ProviderRec* InferencePlugin::pickProvider(QString& fpOut,
         if (m_trustedOnly && !m_trusted.contains(id)) return false;   // whitelist
         if (!m_modelFilter.isEmpty() && !p.models.contains(m_modelFilter)) return false;
         if (p.access == "pow" && p.powBits > 22) return false;
+        // LEZ-ready: a priced provider needs a payment credential we can't
+        // produce yet (no LEZ). Skip it in auto mode rather than send a prompt
+        // we can't pay for. When LEZ lands, this becomes "skip only if amount
+        // exceeds the user's max price / balance".
+        if (p.priceAmount > 0.0) return false;
         return true;
     };
 
@@ -396,23 +401,29 @@ const ProviderRec* InferencePlugin::pickProvider(QString& fpOut,
         }
     }
 
-    // First pass: best (reputation bucket, min load) among eligible providers.
-    int bestBucket = -1, minLoad = INT_MAX;
+    // Rank eligible providers by: reputation bucket (desc), then price (asc —
+    // cheaper wins, meaningful once LEZ prices differ), then load (asc). Random
+    // among exact ties keeps the fleet spread. All prices are 0 today, so price
+    // is a no-op tiebreak now and starts mattering the day providers differ.
+    int bestBucket = -1; double bestPrice = 1e18; int minLoad = INT_MAX;
     for (auto it = m_providers.constBegin(); it != m_providers.constEnd(); ++it) {
         const ProviderRec& p = it.value();
         if (!eligible(it.key(), p)) continue;
         const int b = static_cast<int>(scoreOf(p) * 4);
-        if (b > bestBucket) { bestBucket = b; minLoad = p.load; }
-        else if (b == bestBucket && p.load < minLoad) minLoad = p.load;
+        if (b > bestBucket ||
+            (b == bestBucket && p.priceAmount < bestPrice) ||
+            (b == bestBucket && p.priceAmount == bestPrice && p.load < minLoad)) {
+            bestBucket = b; bestPrice = p.priceAmount; minLoad = p.load;
+        }
     }
     if (bestBucket < 0) return nullptr;   // none available
 
-    // Second pass: collect the ties, pick one at random (spreads the fleet).
     QStringList tied;
     for (auto it = m_providers.constBegin(); it != m_providers.constEnd(); ++it) {
         const ProviderRec& p = it.value();
         if (!eligible(it.key(), p)) continue;
-        if (static_cast<int>(scoreOf(p) * 4) == bestBucket && p.load == minLoad)
+        if (static_cast<int>(scoreOf(p) * 4) == bestBucket
+            && p.priceAmount == bestPrice && p.load == minLoad)
             tied << it.key();
     }
     fpOut = tied.at(QRandomGenerator::global()->bounded(tied.size()));
@@ -800,6 +811,8 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
     QString     price;
     QString     access;
     int         powBits = 0;
+    double      priceAmt = 0.0;
+    QString     priceUnit, priceAsset;
     if (v >= 3) {
         for (const QJsonValue& mv : obj.value("models").toArray())
             models << mv.toString();
@@ -807,9 +820,12 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         model = models.first();
         cap   = obj.value("cap").toInt();
         const QJsonObject priceObj = obj.value("price").toObject();
-        price   = priceObj.value("scheme").toString();
-        access  = priceObj.value("access").toString("open");
-        powBits = priceObj.value("powbits").toInt();
+        price     = priceObj.value("scheme").toString();
+        access    = priceObj.value("access").toString("open");
+        powBits   = priceObj.value("powbits").toInt();
+        priceAmt  = priceObj.value("amount").toDouble();
+        priceUnit = priceObj.value("unit").toString("request");
+        priceAsset= priceObj.value("asset").toString();
         const QString priceJson = QString::fromUtf8(
             QJsonDocument(priceObj).toJson(QJsonDocument::Compact));
         const QByteArray canon3 =
@@ -859,10 +875,13 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         p.topic  = (v >= 3) ? providerTopic(id) : topicForRoom(m_room);
     }
     if (v >= 3) {
-        p.cap     = cap;
-        p.price   = price;
-        p.access  = access;
-        p.powBits = powBits;
+        p.cap        = cap;
+        p.price      = price;
+        p.access     = access;
+        p.powBits    = powBits;
+        p.priceAmount = priceAmt;
+        p.priceUnit  = priceUnit;
+        p.priceAsset = priceAsset;
     }
     if (isNew) {
         qDebug() << "InferencePlugin: provider" << id << "joined roster ("
@@ -985,7 +1004,10 @@ QString InferencePlugin::listProviders()
         o["load"]   = it->load;
         o["cap"]    = it->cap;
         o["origin"] = it->origin;
-        o["price"]  = it->price.isEmpty() ? "free" : it->price;
+        o["price"]       = it->price.isEmpty() ? "free" : it->price;
+        o["priceAmount"] = it->priceAmount;
+        o["priceUnit"]   = it->priceUnit.isEmpty() ? "request" : it->priceUnit;
+        o["priceAsset"]  = it->priceAsset;
         o["access"] = it->access.isEmpty() ? "open" : it->access;
         o["trusted"]      = m_trusted.contains(it.key());
         o["audits"]       = it->audits;

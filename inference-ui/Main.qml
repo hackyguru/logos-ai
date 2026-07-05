@@ -88,6 +88,14 @@ Item {
         return (p.models && p.models.length > 0) ? p.models.join(", ") : (p.model || "?")
     }
 
+    // Human price label: "free" or e.g. "0.5 / req". Assetless amounts are LEZ
+    // units until LEZ names them.
+    function priceLabel(p) {
+        if (!p.priceAmount || p.priceAmount <= 0) return "free"
+        var unit = p.priceUnit === "1ktokens" ? "1k tok" : "req"
+        return p.priceAmount + " / " + unit
+    }
+
     function providerLabel(fp) {
         for (var i = 0; i < providers.length; i++)
             if (providers[i].id === fp)
@@ -587,8 +595,10 @@ Item {
                                 color: "#c5221f"
                             }
                             Text {
-                                text: modelData.price || "free"
-                                font.pixelSize: 11; color: "#888"
+                                text: priceLabel(modelData)
+                                font.pixelSize: 11
+                                color: (!modelData.priceAmount || modelData.priceAmount <= 0)
+                                       ? "#888" : "#188038"
                             }
                             // Whitelist toggle — independent of the pin click.
                             Text {

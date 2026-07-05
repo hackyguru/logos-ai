@@ -44,6 +44,18 @@ ProviderPlugin::ProviderPlugin(QObject* parent)
     const int cap = qEnvironmentVariableIntValue("INFERENCE_MAX_INFLIGHT");
     m_maxInflight = cap > 0 ? cap : 4;
 
+    // Pricing — advertised in the capability card so users choose on cost.
+    // Zero today (LEZ payments aren't live); the structure is the seam:
+    //   amount  — price per `unit` (0 = free)
+    //   unit    — "request" or "1ktokens"
+    //   asset   — LEZ asset/denomination id (empty until LEZ)
+    //   scheme  — "free" while amount==0, else "lez" (payable via a LEZ note)
+    // When LEZ lands: set amount>0 + asset, flip nothing else — the client
+    // already reads these and will attach a lez-note credential to pay.
+    m_priceAmount = qEnvironmentVariable("INFERENCE_PRICE", "0").toDouble();
+    m_priceUnit   = qEnvironmentVariable("INFERENCE_PRICE_UNIT", "request").trimmed();
+    m_priceAsset  = qEnvironmentVariable("INFERENCE_PRICE_ASSET", "").trimmed();
+
     // Access policy — the credential seam. "open" (default) answers anyone;
     // "pow" requires a hashcash stamp inside the sealed prompt, so anonymous
     // users pay ~a CPU-second per request instead of being unlimited. Future
@@ -339,13 +351,20 @@ void ProviderPlugin::sendAnnounce()
 void ProviderPlugin::sendCard(const QString& signPk, const QString& boxPk, int load)
 {
     const qint64 ts = QDateTime::currentMSecsSinceEpoch();
-    // The price object is the economics/access seam — it rides inside the
-    // signed canon as opaque JSON, so adding keys here needs no protocol bump.
-    // (Serialization is alphabetical on every implementation we verify against.)
+    // The price/terms object rides inside the signed canon as opaque JSON, so
+    // adding keys here needs no protocol bump. (Qt serializes object keys
+    // alphabetically; the JS dashboard verifies against a parse→stringify of
+    // the same bytes, so ordering stays consistent across implementations.)
+    //   scheme — "free" (amount 0) or "lez" (payable via a LEZ note, later)
+    //   amount — price per unit; unit — "request"|"1ktokens"; asset — LEZ id
+    //   access — credential demand ("open"|"pow") + powbits when pow
     QJsonObject price;
+    price["scheme"] = m_priceAmount > 0.0 ? "lez" : "free";
+    price["amount"] = m_priceAmount;
+    price["unit"]   = m_priceUnit;
+    price["asset"]  = m_priceAsset;
     price["access"] = m_access;
     if (m_access == "pow") price["powbits"] = m_powBits;
-    price["scheme"] = "free";
     const QString priceJson = QString::fromUtf8(
         QJsonDocument(price).toJson(QJsonDocument::Compact));
     const QString modelsCsv = m_models.join(',');

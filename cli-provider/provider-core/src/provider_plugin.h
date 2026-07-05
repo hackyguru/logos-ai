@@ -65,6 +65,9 @@ private:
     QStringList      m_models;      // all models served (INFERENCE_MODELS csv)
     QString          m_access;      // "open" | "pow" (INFERENCE_ACCESS)
     int              m_powBits = 18;  // hashcash difficulty (INFERENCE_POW_BITS)
+    double           m_priceAmount = 0.0;       // price per unit (0 = free)
+    QString          m_priceUnit;               // "request" | "1ktokens"
+    QString          m_priceAsset;              // LEZ asset id (empty until LEZ)
     QString          m_ollamaUrl;   // OLLAMA_URL, default http://localhost:11434
     bool             m_started        = false;
     bool             m_createNodeDone = false;

@@ -7,7 +7,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 
 interface Provider {
   id: string; models: string[]; load: number; cap: number; price: string;
-  access?: string; powBits?: number;
+  access?: string; powBits?: number; priceAmount?: number; priceUnit?: string;
   version: number; verified: boolean; live: boolean; ageMs: number;
   cardsHeard: number; firstSeenMs: number;
 }
@@ -266,6 +266,7 @@ export default function Home() {
                 <thead>
                   <tr>
                     <th>provider</th><th>models</th><th>signature</th>
+                    <th className="num">price</th>
                     <th className="num">slots</th><th className="num">last seen</th>
                     <th className="num">heard</th>
                   </tr>
@@ -296,6 +297,11 @@ export default function Home() {
                           ? <span style={{ color: "var(--status-good)" }}>✓ signed</span>
                           : <span style={{ color: "var(--status-warning)" }}>⚠ unverified</span>}
                       </td>
+                      <td className="num" style={{ color: (p.priceAmount ?? 0) > 0 ? "var(--status-good)" : "var(--text-muted)" }}>
+                        {(p.priceAmount ?? 0) > 0
+                          ? `${p.priceAmount} / ${p.priceUnit === "1ktokens" ? "1k tok" : "req"}`
+                          : "free"}
+                      </td>
                       <td className="num">{p.cap > 0 ? `${Math.max(0, p.cap - p.load)}/${p.cap}` : "—"}</td>
                       <td className="num" style={{ whiteSpace: "nowrap", color: "var(--text-secondary)" }}>
                         {ago(p.ageMs)}
@@ -304,7 +310,7 @@ export default function Home() {
                     </tr>
                   ))}
                   {(!snap || snap.providers.length === 0) && (
-                    <tr><td colSpan={6} style={{ color: "var(--text-muted)", textAlign: "center", padding: 28 }}>
+                    <tr><td colSpan={7} style={{ color: "var(--text-muted)", textAlign: "center", padding: 28 }}>
                       no providers heard yet
                     </td></tr>
                   )}

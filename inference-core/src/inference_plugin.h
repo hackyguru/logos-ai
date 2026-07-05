@@ -57,7 +57,10 @@ struct ProviderRec {
     QStringList models;     // every model served (v3; [model] for v2)
     QString     topic;      // where to send prompts for this provider
     QString     origin;     // "room" | "discovery"
-    QString     price;      // price scheme ("free" until LEZ payments land)
+    QString     price;      // price scheme: "free" | "lez"
+    double      priceAmount = 0.0;  // per-unit price (0 = free)
+    QString     priceUnit;          // "request" | "1ktokens"
+    QString     priceAsset;         // LEZ asset id (empty until LEZ)
     QString     access;     // credential demand: "open" | "pow" (more later)
     int         powBits    = 0;   // hashcash difficulty when access == "pow"
     int         cap        = 0;   // concurrency capacity (v3; 0 = unknown)
