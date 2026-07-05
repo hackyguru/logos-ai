@@ -146,7 +146,7 @@ private:
     QString           m_modelFilter;           // "" = any model
     QSet<QString>     m_trusted;               // provider whitelist (🛡)
     bool              m_trustedOnly = false;   // enforce the whitelist
-    bool              m_autoAudit   = true;    // canary-audit new capable providers
+    bool              m_autoAudit   = false;   // opt-in (INFERENCE_AUTO_AUDIT); informational only
     bool              m_requireEncryption = false;
     qint64            m_timeoutMs = 90000;     // INFERENCE_TIMEOUT_MS override
     int               m_maxRetries = 2;

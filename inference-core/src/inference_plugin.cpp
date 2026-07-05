@@ -44,6 +44,10 @@ InferencePlugin::InferencePlugin(QObject* parent)
                                  .split(',', Qt::SkipEmptyParts))
         m_trusted.insert(fp.trimmed());
     m_trustedOnly = qEnvironmentVariableIntValue("INFERENCE_TRUSTED_ONLY") > 0;
+    // Canary auditing is parked as opt-in until it's durable enough to gate
+    // routing on (black-box model verification isn't there yet). The whitelist
+    // is the trust mechanism; audits, when enabled, are informational only.
+    m_autoAudit = qEnvironmentVariableIntValue("INFERENCE_AUTO_AUDIT") > 0;
     loadTrust();
     qDebug() << "InferencePlugin: created, myId =" << m_myId
              << "timeoutMs =" << m_timeoutMs;
@@ -379,7 +383,6 @@ const ProviderRec* InferencePlugin::pickProvider(QString& fpOut,
     const auto eligible = [this, cutoff, &exclude](const QString& id, const ProviderRec& p) {
         if (p.lastSeenMs < cutoff || exclude.contains(id)) return false;
         if (m_trustedOnly && !m_trusted.contains(id)) return false;   // whitelist
-        if (p.audits > 0 && p.auditsPassed == 0) return false;        // failed audit
         if (!m_modelFilter.isEmpty() && !p.models.contains(m_modelFilter)) return false;
         if (p.access == "pow" && p.powBits > 22) return false;
         return true;
