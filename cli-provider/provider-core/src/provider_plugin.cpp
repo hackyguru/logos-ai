@@ -579,6 +579,17 @@ void ProviderPlugin::runInference(const QString& id, const QString& replyPkB64,
     // it). Gated by family: ollama rejects think=false on non-thinking models.
     if (model.startsWith("qwen3") || model.startsWith("deepseek-r1"))
         req["think"] = false;
+    // Bound answer length so an open-ended prompt ("what is liverpool") can't
+    // ramble past the user's ~90s timeout on CPU (an 8B model runs ~7 tok/s
+    // here, so 512 tokens ≈ 70s worst case). INFERENCE_NUM_PREDICT overrides.
+    QJsonObject opts;
+    const int np = qEnvironmentVariableIntValue("INFERENCE_NUM_PREDICT");
+    opts["num_predict"] = np > 0 ? np : 512;
+    req["options"] = opts;
+    // Keep the model resident so a request after a lull doesn't pay a cold
+    // reload on top of generation (the spike that pushed prompts over the
+    // timeout). INFERENCE_KEEP_ALIVE overrides ("-1" = never unload).
+    req["keep_alive"] = qEnvironmentVariable("INFERENCE_KEEP_ALIVE", "30m");
     const QByteArray body = QJsonDocument(req).toJson(QJsonDocument::Compact);
     const QString url = m_ollamaUrl + "/api/generate";
 
