@@ -588,8 +588,15 @@ void ProviderPlugin::runInference(const QString& id, const QString& replyPkB64,
     req["options"] = opts;
     // Keep the model resident so a request after a lull doesn't pay a cold
     // reload on top of generation (the spike that pushed prompts over the
-    // timeout). INFERENCE_KEEP_ALIVE overrides ("-1" = never unload).
-    req["keep_alive"] = qEnvironmentVariable("INFERENCE_KEEP_ALIVE", "30m");
+    // timeout). INFERENCE_KEEP_ALIVE overrides. ollama wants a NUMBER for
+    // seconds (-1 = never unload) or a duration STRING ("30m"); a numeric
+    // string like "-1" fails its duration parser, so send numerics as JSON
+    // numbers and everything else as a string.
+    const QString ka = qEnvironmentVariable("INFERENCE_KEEP_ALIVE", "30m");
+    bool kaIsNum = false;
+    const qlonglong kaNum = ka.toLongLong(&kaIsNum);
+    if (kaIsNum) req["keep_alive"] = static_cast<double>(kaNum);
+    else         req["keep_alive"] = ka;
     const QByteArray body = QJsonDocument(req).toJson(QJsonDocument::Compact);
     const QString url = m_ollamaUrl + "/api/generate";
 
