@@ -91,10 +91,14 @@ Item {
     // Human price label: "free" or e.g. "0.5 / req". Assetless amounts are LEZ
     // units until LEZ names them.
     function priceLabel(p) {
+        // Incentivized (LEZ payment stream): billed by rate over time, not a
+        // per-request amount — so priceAmount is 0 but it is NOT free.
+        if (p.access === "lez") return "⚡ " + (p.rate || 0) + "/s"
         if (!p.priceAmount || p.priceAmount <= 0) return "free"
         var unit = p.priceUnit === "1ktokens" ? "1k tok" : "req"
         return p.priceAmount + " / " + unit
     }
+    function isPaid(p) { return p.access === "lez" || (p.priceAmount > 0) }
 
     function providerLabel(fp) {
         for (var i = 0; i < providers.length; i++)
@@ -597,8 +601,7 @@ Item {
                             Text {
                                 text: priceLabel(modelData)
                                 font.pixelSize: 11
-                                color: (!modelData.priceAmount || modelData.priceAmount <= 0)
-                                       ? "#888" : "#188038"
+                                color: isPaid(modelData) ? "#188038" : "#888"
                             }
                             // Whitelist toggle — independent of the pin click.
                             Text {
