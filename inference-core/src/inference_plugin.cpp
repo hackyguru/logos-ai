@@ -1071,6 +1071,8 @@ QString InferencePlugin::listProviders()
         o["priceUnit"]   = it->priceUnit.isEmpty() ? "request" : it->priceUnit;
         o["priceAsset"]  = it->priceAsset;
         o["access"] = it->access.isEmpty() ? "open" : it->access;
+        o["payTo"]  = it->payTo;
+        o["rate"]   = it->rate;
         o["trusted"]      = m_trusted.contains(it.key());
         o["audits"]       = it->audits;
         o["auditsPassed"] = it->auditsPassed;
