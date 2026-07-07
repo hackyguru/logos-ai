@@ -61,8 +61,10 @@ struct ProviderRec {
     double      priceAmount = 0.0;  // per-unit price (0 = free)
     QString     priceUnit;          // "request" | "1ktokens"
     QString     priceAsset;         // LEZ asset id (empty until LEZ)
-    QString     access;     // credential demand: "open" | "pow" (more later)
+    QString     access;     // credential demand: "open" | "pow" | "lez"
     int         powBits    = 0;   // hashcash difficulty when access == "pow"
+    QString     payTo;      // provider LEZ account (access == "lez")
+    double      rate       = 0.0; // stream draw, TokensPerSecond (access == "lez")
     int         cap        = 0;   // concurrency capacity (v3; 0 = unknown)
     int         load       = 0;
     qint64      lastSeenMs = 0;
@@ -132,6 +134,8 @@ private:
     void    saveTrust() const;
     static bool   computePow(const QString& promptId, const QString& providerFp,
                              int bits, QString& nonceOut);
+    bool    ensureStream(const QString& providerFp, const ProviderRec& p,
+                         QString& vaultIdOut, QString& streamIdOut);
     bool    dispatchPrompt(PromptRec& rec);
     void    sweepPending();
     void    pruneHistory();
@@ -149,6 +153,11 @@ private:
     QString           m_modelFilter;           // "" = any model
     QSet<QString>     m_trusted;               // provider whitelist (🛡)
     bool              m_trustedOnly = false;   // enforce the whitelist
+    // Open LIP-155 streams to paid providers: providerFp → "vaultId|streamId".
+    // Mock today (synthetic ids); the real backend fills these via
+    // payment_streams_module. INFERENCE_PAY_BACKEND selects mock vs lez.
+    QHash<QString, QString> m_streams;
+    QString           m_payBackend;
     bool              m_autoAudit   = false;   // opt-in (INFERENCE_AUTO_AUDIT); informational only
     bool              m_requireEncryption = false;
     qint64            m_timeoutMs = 90000;     // INFERENCE_TIMEOUT_MS override

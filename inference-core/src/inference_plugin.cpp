@@ -48,6 +48,10 @@ InferencePlugin::InferencePlugin(QObject* parent)
     // routing on (black-box model verification isn't there yet). The whitelist
     // is the trust mechanism; audits, when enabled, are informational only.
     m_autoAudit = qEnvironmentVariableIntValue("INFERENCE_AUTO_AUDIT") > 0;
+    // Payment backend for incentivized (access=lez) providers: "mock" runs the
+    // paid flow with synthetic stream ids (dev/macOS); "lez" uses the real
+    // payment_streams_module (Linux, once loaded).
+    m_payBackend = qEnvironmentVariable("INFERENCE_PAY_BACKEND", "mock").trimmed().toLower();
     loadTrust();
     qDebug() << "InferencePlugin: created, myId =" << m_myId
              << "timeoutMs =" << m_timeoutMs;
@@ -385,11 +389,10 @@ const ProviderRec* InferencePlugin::pickProvider(QString& fpOut,
         if (m_trustedOnly && !m_trusted.contains(id)) return false;   // whitelist
         if (!m_modelFilter.isEmpty() && !p.models.contains(m_modelFilter)) return false;
         if (p.access == "pow" && p.powBits > 22) return false;
-        // LEZ-ready: a priced provider needs a payment credential we can't
-        // produce yet (no LEZ). Skip it in auto mode rather than send a prompt
-        // we can't pay for. When LEZ lands, this becomes "skip only if amount
-        // exceeds the user's max price / balance".
-        if (p.priceAmount > 0.0) return false;
+        // Incentivized (access=lez) providers ARE payable — we open a stream
+        // to them (dispatchPrompt → ensureStream). A provider that's priced but
+        // not stream-based (legacy per-request) we still can't pay, so skip.
+        if (p.access != "lez" && p.priceAmount > 0.0) return false;
         return true;
     };
 
@@ -452,6 +455,41 @@ bool InferencePlugin::computePow(const QString& promptId, const QString& provide
         if (zeros >= bits) { nonceOut = QString::fromLatin1(nonce); return true; }
     }
     return false;
+}
+
+// Ensure we hold an open, funded LIP-155 stream to a paid provider, returning
+// its (vaultId, streamId). One stream per provider, reused across prompts.
+//
+// Mock backend (default / macOS): synthesize a stable per-provider stream id so
+// the whole paid flow runs end to end without the LEZ wallet module.
+// Real backend (INFERENCE_PAY_BACKEND=lez, Linux): initialize a pseudonymous
+// vault, shielded-deposit, and create_stream(provider=p.payTo, rate=p.rate,
+// allocation) via payment_streams_module + logos_execution_zone — persisting
+// the ids here. Left as the single seam to fill when those modules load.
+bool InferencePlugin::ensureStream(const QString& providerFp, const ProviderRec& p,
+                                   QString& vaultIdOut, QString& streamIdOut)
+{
+    if (p.payTo.isEmpty()) return false;   // provider advertised no pay account
+    const auto it = m_streams.constFind(providerFp);
+    if (it != m_streams.constEnd()) {
+        const int sep = it.value().indexOf('|');
+        vaultIdOut  = it.value().left(sep);
+        streamIdOut = it.value().mid(sep + 1);
+        return true;
+    }
+    if (m_payBackend == "lez") {
+        qWarning() << "InferencePlugin: INFERENCE_PAY_BACKEND=lez but the real"
+                   << "payment_streams_module backend isn't wired yet —"
+                   << "can't open a stream to" << providerFp;
+        return false;
+    }
+    // mock: deterministic ids derived from our id + the provider fingerprint.
+    vaultIdOut  = "v-" + m_myId + "-" + providerFp.left(8);
+    streamIdOut = "s-" + providerFp.left(8);
+    m_streams.insert(providerFp, vaultIdOut + "|" + streamIdOut);
+    qDebug() << "InferencePlugin: opened (mock) stream to" << providerFp
+             << "vault" << vaultIdOut << "stream" << streamIdOut;
+    return true;
 }
 
 // ── Canary auditing ──────────────────────────────────────────────────
@@ -577,6 +615,24 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
             QJsonObject cred;
             cred["type"]  = "pow";
             cred["nonce"] = nonce;
+            inner["cred"] = cred;
+        } else if (prov->access == "lez") {
+            // Incentivized provider: reference our open LIP-155 stream to it.
+            // ensureStream returns the (vaultId, streamId) of a funded stream to
+            // this provider, opening one if needed. Mock today (a per-provider
+            // synthetic stream id); the real impl calls payment_streams_module /
+            // logos_execution_zone to initialize_vault → deposit → create_stream.
+            QString vaultId, streamId;
+            if (!ensureStream(providerFp, *prov, vaultId, streamId)) {
+                qWarning() << "InferencePlugin: no payable stream to" << providerFp
+                           << "— skipping provider";
+                rec.tried << providerFp;
+                return dispatchPrompt(rec);
+            }
+            QJsonObject cred;
+            cred["type"]     = "lez-stream";
+            cred["vaultId"]  = vaultId;
+            cred["streamId"] = streamId;
             inner["cred"] = cred;
         }
         const QByteArray sealed = InferenceIdentity::seal(
@@ -813,6 +869,8 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
     int         powBits = 0;
     double      priceAmt = 0.0;
     QString     priceUnit, priceAsset;
+    QString     payTo;
+    double      rate = 0.0;
     if (v >= 3) {
         for (const QJsonValue& mv : obj.value("models").toArray())
             models << mv.toString();
@@ -826,6 +884,8 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         priceAmt  = priceObj.value("amount").toDouble();
         priceUnit = priceObj.value("unit").toString("request");
         priceAsset= priceObj.value("asset").toString();
+        payTo     = priceObj.value("payTo").toString();
+        rate      = priceObj.value("rate").toDouble();
         const QString priceJson = QString::fromUtf8(
             QJsonDocument(priceObj).toJson(QJsonDocument::Compact));
         const QByteArray canon3 =
@@ -879,6 +939,8 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         p.price      = price;
         p.access     = access;
         p.powBits    = powBits;
+        p.payTo      = payTo;
+        p.rate       = rate;
         p.priceAmount = priceAmt;
         p.priceUnit  = priceUnit;
         p.priceAsset = priceAsset;

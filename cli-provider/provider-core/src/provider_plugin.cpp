@@ -62,9 +62,22 @@ ProviderPlugin::ProviderPlugin(QObject* parent)
     // credential types (identity tiers, vouchers, RLN proofs, LEZ notes) slot
     // into the same `cred` field without another protocol change.
     m_access = qEnvironmentVariable("INFERENCE_ACCESS", "open").trimmed().toLower();
-    if (m_access != "pow") m_access = "open";
+    if (m_access != "pow" && m_access != "lez") m_access = "open";
     const int bits = qEnvironmentVariableIntValue("INFERENCE_POW_BITS");
     m_powBits = (bits >= 8 && bits <= 30) ? bits : 18;
+
+    // Incentivization (INFERENCE_ACCESS=lez): this node only answers prompts
+    // backed by an open LIP-155 payment stream to its LEZ account. payTo is the
+    // provider's LEZ account (advertised so clients open a stream to it); rate
+    // is the stream draw in TokensPerSecond. Verification/claims go through the
+    // PaymentBackend — a mock today (accepts a well-formed stream cred), the
+    // real payment_streams_module (loaded beside inference_provider) on Linux.
+    m_payTo = qEnvironmentVariable("INFERENCE_PAY_TO", "").trimmed();
+    m_rate  = qEnvironmentVariable("INFERENCE_RATE", "1").toDouble();
+    m_payBackend = qEnvironmentVariable("INFERENCE_PAY_BACKEND", "mock").trimmed().toLower();
+    if (m_access == "lez" && m_payTo.isEmpty())
+        qWarning() << "ProviderPlugin: INFERENCE_ACCESS=lez but no INFERENCE_PAY_TO"
+                   << "— clients can't open a stream; set a LEZ account id";
 
     qDebug() << "ProviderPlugin: created, id =" << m_id
              << "model =" << m_model << "ollama =" << m_ollamaUrl
@@ -94,6 +107,31 @@ bool ProviderPlugin::powValid(const QString& promptId, const QString& nonce) con
     const QByteArray digest = QCryptographicHash::hash(
         (promptId + "|" + m_id + "|" + nonce).toUtf8(), QCryptographicHash::Sha256);
     return leadingZeroBits(digest) >= m_powBits;
+}
+
+// PaymentBackend seam. A prompt is served only if it carries a cred proving an
+// open, funded LIP-155 stream to this provider. The real backend asks
+// payment_streams_module (loaded beside us) to verify the (vaultId, streamId)
+// is active, targets m_payTo, and has allocation left — and periodically
+// claims. The mock (dev, macOS where the LEZ wallet module can't build)
+// accepts any well-formed stream cref so the whole paid flow runs end to end.
+bool ProviderPlugin::streamEligible(const QJsonObject& cred) const
+{
+    const QString vaultId  = cred.value("vaultId").toString();
+    const QString streamId = cred.value("streamId").toString();
+    if (vaultId.isEmpty() || streamId.isEmpty()) return false;
+
+    if (m_payBackend == "lez") {
+        // Real path (Linux, payment_streams_module loaded):
+        //   invokeRemoteMethod("payment_streams_module", "verifyEligibility",
+        //                      {vaultId, streamId, m_payTo}) → bool
+        // Deferred until the module builds on Linux; see the localnet recipe.
+        qWarning() << "ProviderPlugin: INFERENCE_PAY_BACKEND=lez but the real"
+                   << "payment_streams_module backend isn't wired yet — declining";
+        return false;
+    }
+    // mock: well-formed stream cred is treated as eligible.
+    return true;
 }
 
 ProviderPlugin::~ProviderPlugin() = default;
@@ -359,12 +397,16 @@ void ProviderPlugin::sendCard(const QString& signPk, const QString& boxPk, int l
     //   amount — price per unit; unit — "request"|"1ktokens"; asset — LEZ id
     //   access — credential demand ("open"|"pow") + powbits when pow
     QJsonObject price;
-    price["scheme"] = m_priceAmount > 0.0 ? "lez" : "free";
+    // access=lez ⇒ incentivized: advertise the LEZ pay account + stream rate so
+    // clients open a LIP-155 stream to us; scheme flips to "lez".
+    const bool paid = (m_access == "lez");
+    price["scheme"] = (paid || m_priceAmount > 0.0) ? "lez" : "free";
     price["amount"] = m_priceAmount;
     price["unit"]   = m_priceUnit;
     price["asset"]  = m_priceAsset;
     price["access"] = m_access;
     if (m_access == "pow") price["powbits"] = m_powBits;
+    if (paid) { price["payTo"] = m_payTo; price["rate"] = m_rate; }
     const QString priceJson = QString::fromUtf8(
         QJsonDocument(price).toJson(QJsonDocument::Compact));
     const QString modelsCsv = m_models.join(',');
@@ -498,9 +540,10 @@ void ProviderPlugin::handleMessageReceived(const QVariantList& data)
                      << reqModel << "we don't serve — using" << m_model;
             reqModel.clear();
         }
-        // Credential seam: enforce this node's access policy. Today the only
-        // credential type is a hashcash stamp; tomorrow's types (identity,
-        // voucher, RLN proof, LEZ note) validate here too.
+        // Credential seam: enforce this node's access policy. "pow" = hashcash
+        // stamp; "lez" = an open LIP-155 payment stream to this provider
+        // (incentivized). Future types (identity, voucher, RLN proof) slot in
+        // the same way.
         if (m_access == "pow") {
             const QJsonObject cred = innerDoc.object().value("cred").toObject();
             if (cred.value("type").toString() != "pow" ||
@@ -508,6 +551,14 @@ void ProviderPlugin::handleMessageReceived(const QVariantList& data)
                 qDebug() << "ProviderPlugin: prompt" << id
                          << "has no valid pow stamp (" << m_powBits
                          << "bits required) — declining";
+                return;
+            }
+        } else if (m_access == "lez") {
+            const QJsonObject cred = innerDoc.object().value("cred").toObject();
+            if (cred.value("type").toString() != "lez-stream" ||
+                !streamEligible(cred)) {
+                qDebug() << "ProviderPlugin: prompt" << id
+                         << "has no eligible payment stream — declining";
                 return;
             }
         }
