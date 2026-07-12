@@ -490,7 +490,7 @@ void ProviderPlugin::sendCard(const QString& signPk, const QString& boxPk, int l
     price["asset"]  = m_priceAsset;
     price["access"] = m_access;
     if (m_access == "pow") price["powbits"] = m_powBits;
-    if (paid) { price["payTo"] = m_payTo; price["rate"] = m_rate; }
+    if (paid) { price["payTo"] = m_payTo; price["rate"] = m_rate; price["quota"] = m_quota; }
     const QString priceJson = QString::fromUtf8(
         QJsonDocument(price).toJson(QJsonDocument::Compact));
     const QString modelsCsv = m_models.join(',');

@@ -513,10 +513,19 @@ bool InferencePlugin::ensureSession(const QString& providerFp, const ProviderRec
                                     QString& amountOut)
 {
     if (p.payTo.isEmpty()) return false;   // provider advertised no pay account
-    const auto it = m_sessions.constFind(providerFp);
-    if (it != m_sessions.constEnd()) {
-        amountOut = QString::number(qulonglong(it.value().amount));
-        return it.value().ready;
+    const auto it = m_sessions.find(providerFp);
+    if (it != m_sessions.end()) {
+        // Reuse the current session until its prepaid quota is spent; once spent,
+        // drop it and fall through to open (pay for) a fresh one.
+        const bool exhausted = it->ready && p.quota > 0 && it->used >= p.quota;
+        if (!exhausted) {
+            amountOut = QString::number(qulonglong(it->amount));
+            if (it->ready) it->used++;   // count this prompt against the quota
+            return it->ready;
+        }
+        qInfo() << "InferencePlugin: session to" << providerFp << "spent ("
+                << it->used << "/" << p.quota << ") — opening a new one";
+        m_sessions.erase(it);
     }
 
     // A session's payment amount is (advertised price, at least 1) plus a small
@@ -993,6 +1002,7 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
     QString     priceUnit, priceAsset;
     QString     payTo;
     double      rate = 0.0;
+    int         quota = 0;
     if (v >= 3) {
         for (const QJsonValue& mv : obj.value("models").toArray())
             models << mv.toString();
@@ -1008,6 +1018,7 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         priceAsset= priceObj.value("asset").toString();
         payTo     = priceObj.value("payTo").toString();
         rate      = priceObj.value("rate").toDouble();
+        quota     = priceObj.value("quota").toInt();
         const QString priceJson = QString::fromUtf8(
             QJsonDocument(priceObj).toJson(QJsonDocument::Compact));
         const QByteArray canon3 =
@@ -1063,6 +1074,7 @@ void InferencePlugin::handleAnnounce(const QJsonObject& obj)
         p.powBits    = powBits;
         p.payTo      = payTo;
         p.rate       = rate;
+        p.quota      = quota;
         p.priceAmount = priceAmt;
         p.priceUnit  = priceUnit;
         p.priceAsset = priceAsset;

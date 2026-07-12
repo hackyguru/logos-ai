@@ -71,6 +71,7 @@ struct ProviderRec {
     int         powBits    = 0;   // hashcash difficulty when access == "pow"
     QString     payTo;      // provider LEZ account (access == "lez")
     double      rate       = 0.0; // stream draw, TokensPerSecond (access == "lez")
+    int         quota      = 0;   // prompts one prepaid session buys (access == "lez")
     int         cap        = 0;   // concurrency capacity (v3; 0 = unknown)
     int         load       = 0;
     qint64      lastSeenMs = 0;
@@ -168,7 +169,7 @@ private:
     // Prepaid sessions to paid providers (per-session prepay). providerFp → the
     // session's unique payment amount, the payTo balance baseline when we opened
     // it, and whether the payment has settled on-chain yet.
-    struct PaySession { double amount = 0.0; double baseline = 0.0; bool ready = false; };
+    struct PaySession { double amount = 0.0; double baseline = 0.0; bool ready = false; int used = 0; };
     QHash<QString, PaySession> m_sessions;
     QString           m_payBackend;
     QString           m_seq;                    // LEZ sequencer URL (LEZ_SEQUENCER)
