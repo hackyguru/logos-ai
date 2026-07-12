@@ -13,6 +13,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QProcess>
+#include <QtMath>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QUuid>
@@ -49,9 +51,11 @@ InferencePlugin::InferencePlugin(QObject* parent)
     // is the trust mechanism; audits, when enabled, are informational only.
     m_autoAudit = qEnvironmentVariableIntValue("INFERENCE_AUTO_AUDIT") > 0;
     // Payment backend for incentivized (access=lez) providers: "mock" runs the
-    // paid flow with synthetic stream ids (dev/macOS); "lez" uses the real
-    // payment_streams_module (Linux, once loaded).
+    // paid flow with a synthetic session id (dev/macOS); "lez" pays for real by
+    // deshielding (private→public) a one-time amount to the provider's public
+    // account through logos_wallet — the user stays shielded.
     m_payBackend = qEnvironmentVariable("INFERENCE_PAY_BACKEND", "mock").trimmed().toLower();
+    m_seq = qEnvironmentVariable("LEZ_SEQUENCER", "https://testnet.lez.logos.co").trimmed();
     loadTrust();
     qDebug() << "InferencePlugin: created, myId =" << m_myId
              << "timeoutMs =" << m_timeoutMs;
@@ -457,39 +461,137 @@ bool InferencePlugin::computePow(const QString& promptId, const QString& provide
     return false;
 }
 
-// Ensure we hold an open, funded LIP-155 stream to a paid provider, returning
-// its (vaultId, streamId). One stream per provider, reused across prompts.
+// Encode a hex account id as base58 (Bitcoin alphabet) — the LEZ sequencer's
+// getAccountBalance RPC wants base58. Empty in → empty out.
+static QString hexToB58(const QString& hex)
+{
+    const QByteArray bytes = QByteArray::fromHex(hex.toLatin1());
+    if (bytes.isEmpty()) return QString();
+    static const char* A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    int zeros = 0;
+    while (zeros < bytes.size() && bytes.at(zeros) == 0) ++zeros;
+    QList<int> digits;                                   // base58, little-endian
+    for (unsigned char byte : bytes) {
+        int carry = byte;
+        for (int i = 0; i < digits.size(); ++i) {
+            carry += digits[i] * 256;
+            digits[i] = carry % 58;
+            carry /= 58;
+        }
+        while (carry) { digits.append(carry % 58); carry /= 58; }
+    }
+    QString s(zeros, QLatin1Char('1'));
+    for (int i = digits.size() - 1; i >= 0; --i) s.append(QLatin1Char(A[digits[i]]));
+    return s;
+}
+
+// A public account's transparent balance from the sequencer RPC (-1 on error).
+double InferencePlugin::seqBalance(const QString& payToHex) const
+{
+    const QString b58 = hexToB58(payToHex);
+    if (b58.isEmpty()) return -1.0;
+    QProcess p;
+    const QString body = QStringLiteral(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountBalance\",\"params\":[\"%1\"]}").arg(b58);
+    p.start("curl", {"-s", "-m", "10", "-X", "POST", m_seq,
+                     "-H", "content-type: application/json", "-d", body});
+    if (!p.waitForFinished(12000)) { p.kill(); return -1.0; }
+    const QJsonValue r = QJsonDocument::fromJson(p.readAllStandardOutput())
+                             .object().value("result");
+    return r.isDouble() ? r.toDouble() : -1.0;
+}
+
+// Ensure a prepaid session to a paid provider, returning the session amount
+// (which doubles as its id). One session per provider, reused across prompts.
 //
-// Mock backend (default / macOS): synthesize a stable per-provider stream id so
-// the whole paid flow runs end to end without the LEZ wallet module.
-// Real backend (INFERENCE_PAY_BACKEND=lez, Linux): initialize a pseudonymous
-// vault, shielded-deposit, and create_stream(provider=p.payTo, rate=p.rate,
-// allocation) via payment_streams_module + logos_execution_zone — persisting
-// the ids here. Left as the single seam to fill when those modules load.
-bool InferencePlugin::ensureStream(const QString& providerFp, const ProviderRec& p,
-                                   QString& vaultIdOut, QString& streamIdOut)
+// Mock backend (dev/macOS): mark ready immediately with a synthetic amount so
+// the paid flow runs end to end without a funded wallet. Real backend
+// (INFERENCE_PAY_BACKEND=lez): on first use, deshield a unique one-time amount
+// (private→public) to the provider's public payTo through logos_wallet — the
+// payer stays shielded — and report not-ready until pollPayments() sees it land.
+bool InferencePlugin::ensureSession(const QString& providerFp, const ProviderRec& p,
+                                    QString& amountOut)
 {
     if (p.payTo.isEmpty()) return false;   // provider advertised no pay account
-    const auto it = m_streams.constFind(providerFp);
-    if (it != m_streams.constEnd()) {
-        const int sep = it.value().indexOf('|');
-        vaultIdOut  = it.value().left(sep);
-        streamIdOut = it.value().mid(sep + 1);
+    const auto it = m_sessions.constFind(providerFp);
+    if (it != m_sessions.constEnd()) {
+        amountOut = QString::number(qulonglong(it.value().amount));
+        return it.value().ready;
+    }
+
+    // A session's payment amount is (advertised price, at least 1) plus a small
+    // random salt so each session's on-chain credit is unique — that uniqueness
+    // is what lets the provider bind a payment to a session without a memo.
+    const qulonglong base = qMax<qulonglong>(1, qulonglong(qCeil(p.priceAmount)));
+    const qulonglong amount = base + QRandomGenerator::global()->bounded(1, 20);
+    PaySession s;
+    s.amount = double(amount);
+
+    if (m_payBackend != "lez") {           // mock: instantly ready
+        s.ready = true;
+        m_sessions.insert(providerFp, s);
+        amountOut = QString::number(amount);
+        qDebug() << "InferencePlugin: opened (mock) session to" << providerFp << "amount" << amount;
         return true;
     }
-    if (m_payBackend == "lez") {
-        qWarning() << "InferencePlugin: INFERENCE_PAY_BACKEND=lez but the real"
-                   << "payment_streams_module backend isn't wired yet —"
-                   << "can't open a stream to" << providerFp;
+
+    if (!m_walletClient) m_walletClient = logosAPI ? logosAPI->getClient("logos_wallet") : nullptr;
+    if (!m_walletClient) {
+        qWarning() << "InferencePlugin: INFERENCE_PAY_BACKEND=lez but logos_wallet is"
+                   << "unavailable — can't pay" << providerFp;
         return false;
     }
-    // mock: deterministic ids derived from our id + the provider fingerprint.
-    vaultIdOut  = "v-" + m_myId + "-" + providerFp.left(8);
-    streamIdOut = "s-" + providerFp.left(8);
-    m_streams.insert(providerFp, vaultIdOut + "|" + streamIdOut);
-    qDebug() << "InferencePlugin: opened (mock) stream to" << providerFp
-             << "vault" << vaultIdOut << "stream" << streamIdOut;
-    return true;
+    s.baseline = seqBalance(p.payTo);      // count only credit received from here on
+    if (s.baseline < 0.0) {
+        qWarning() << "InferencePlugin: can't read payTo balance for" << providerFp << "— not paying";
+        return false;
+    }
+    // Fire the one-time payment: deshield from our (auto-picked) private account
+    // to the provider's public account. Async — settles in ~a minute; pollPayments
+    // flips the session ready once the credit shows up.
+    m_walletClient->invokeRemoteMethod("logos_wallet", "lezTransfer",
+        QVariantList{ QStringLiteral("deshielded"), QString(), p.payTo, QString::number(amount) });
+    m_sessions.insert(providerFp, s);
+    amountOut = QString::number(amount);
+    qInfo() << "InferencePlugin: paying" << amount << "to" << providerFp
+            << "(deshield → " << p.payTo.left(10) << "…) — awaiting settlement";
+    if (!m_payTimer) {
+        m_payTimer = new QTimer(this);
+        connect(m_payTimer, &QTimer::timeout, this, &InferencePlugin::pollPayments);
+        m_payTimer->start(6000);
+    } else if (!m_payTimer->isActive()) {
+        m_payTimer->start(6000);
+    }
+    return false;   // parked until funded
+}
+
+// Poll each pending session's payTo balance; when the one-time payment has
+// landed, mark the session ready and release the prompts parked on it.
+void InferencePlugin::pollPayments()
+{
+    bool anyPending = false;
+    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
+        if (it.value().ready) continue;
+        const auto pit = m_providers.constFind(it.key());
+        if (pit == m_providers.constEnd() || pit->payTo.isEmpty()) continue;
+        const double bal = seqBalance(pit->payTo);
+        if (bal < 0.0) { anyPending = true; continue; }
+        if (bal - it.value().baseline + 1e-9 >= it.value().amount) {
+            it.value().ready = true;
+            qInfo() << "InferencePlugin: session to" << it.key() << "funded ("
+                    << it.value().amount << ") — releasing parked prompts";
+            // Release every prompt waiting on this provider.
+            for (PromptRec& rec : m_prompts) {
+                if (rec.waitPay && rec.payFp == it.key() && !rec.answered && !rec.failed) {
+                    rec.waitPay = false;
+                    dispatchPrompt(rec);
+                }
+            }
+        } else {
+            anyPending = true;
+        }
+    }
+    if (!anyPending && m_payTimer) m_payTimer->stop();
 }
 
 // ── Canary auditing ──────────────────────────────────────────────────
@@ -617,22 +719,30 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
             cred["nonce"] = nonce;
             inner["cred"] = cred;
         } else if (prov->access == "lez") {
-            // Incentivized provider: reference our open LIP-155 stream to it.
-            // ensureStream returns the (vaultId, streamId) of a funded stream to
-            // this provider, opening one if needed. Mock today (a per-provider
-            // synthetic stream id); the real impl calls payment_streams_module /
-            // logos_execution_zone to initialize_vault → deposit → create_stream.
-            QString vaultId, streamId;
-            if (!ensureStream(providerFp, *prov, vaultId, streamId)) {
-                qWarning() << "InferencePlugin: no payable stream to" << providerFp
+            // Incentivized provider: prepay a session (a one-time deshield to its
+            // public payTo). If the payment hasn't settled yet, PARK this prompt
+            // on the provider — don't seal/send and don't fail over to someone
+            // else (we've committed funds here) — pollPayments releases it once
+            // the credit lands.
+            QString amount;
+            if (!ensureSession(providerFp, *prov, amount)) {
+                if (m_sessions.contains(providerFp)) {   // paying, not yet funded → park
+                    rec.waitPay    = true;
+                    rec.payFp      = providerFp;
+                    rec.provider   = providerFp;
+                    if (rec.payStartMs == 0) rec.payStartMs = nowMs();
+                    qDebug() << "InferencePlugin: prompt" << rec.id << "parked — awaiting"
+                             << "payment settlement to" << providerFp;
+                    return true;
+                }
+                qWarning() << "InferencePlugin: can't open a paid session to" << providerFp
                            << "— skipping provider";
                 rec.tried << providerFp;
                 return dispatchPrompt(rec);
             }
             QJsonObject cred;
-            cred["type"]     = "lez-stream";
-            cred["vaultId"]  = vaultId;
-            cred["streamId"] = streamId;
+            cred["type"]   = "lez-prepay";
+            cred["amount"] = amount;              // the unique amount = session id
             inner["cred"] = cred;
         }
         const QByteArray sealed = InferenceIdentity::seal(
@@ -732,8 +842,20 @@ void InferencePlugin::pruneHistory()
 void InferencePlugin::sweepPending()
 {
     const qint64 now = nowMs();
+    static const qint64 PAY_DEADLINE_MS = 240000;   // give a shielded spend ~4 min to settle
     for (PromptRec& p : m_prompts) {
         if (p.answered || p.failed) continue;
+        // Parked awaiting payment: not a provider timeout — leave it for
+        // pollPayments to release, unless the payment never settles.
+        if (p.waitPay) {
+            if (p.payStartMs > 0 && now - p.payStartMs > PAY_DEADLINE_MS) {
+                p.waitPay = false; p.failed = true;
+                qWarning() << "InferencePlugin: prompt" << p.id
+                           << "failed — payment to" << p.payFp << "never settled";
+                emit eventResponse("promptFailed", QVariantList{ p.id });
+            }
+            continue;
+        }
         if (now - p.lastSendMs < m_timeoutMs) continue;
 
         // Reputation: whoever we asked ate this attempt without answering.

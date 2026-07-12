@@ -44,6 +44,12 @@ struct PromptRec {
     QString expect;
     QString pin;
     QString reqModel;
+    // Paid providers (access=lez): the prompt is parked here while its
+    // prepaid session's one-time payment settles on-chain — not dispatched to
+    // anyone until pollPayments() confirms the payment landed, then released.
+    bool    waitPay    = false;
+    QString payFp;             // provider we're paying for this prompt
+    qint64  payStartMs = 0;    // when we began waiting (safety deadline)
 };
 
 // A provider we've heard a (signature-verified) announce from — either in the
@@ -134,8 +140,14 @@ private:
     void    saveTrust() const;
     static bool   computePow(const QString& promptId, const QString& providerFp,
                              int bits, QString& nonceOut);
-    bool    ensureStream(const QString& providerFp, const ProviderRec& p,
-                         QString& vaultIdOut, QString& streamIdOut);
+    // Per-session prepay. Ensures a prepaid session to a paid provider: on first
+    // use it fires a one-time deshield (private→public) of a unique amount to
+    // the provider's public payTo via logos_wallet, then reports readiness once
+    // pollPayments() sees the payment settle. amountOut is the session id.
+    bool    ensureSession(const QString& providerFp, const ProviderRec& p,
+                          QString& amountOut);
+    double  seqBalance(const QString& payToHex) const;   // public balance via RPC (-1 err)
+    void    pollPayments();                              // release parked prompts once funded
     bool    dispatchPrompt(PromptRec& rec);
     void    sweepPending();
     void    pruneHistory();
@@ -153,11 +165,15 @@ private:
     QString           m_modelFilter;           // "" = any model
     QSet<QString>     m_trusted;               // provider whitelist (🛡)
     bool              m_trustedOnly = false;   // enforce the whitelist
-    // Open LIP-155 streams to paid providers: providerFp → "vaultId|streamId".
-    // Mock today (synthetic ids); the real backend fills these via
-    // payment_streams_module. INFERENCE_PAY_BACKEND selects mock vs lez.
-    QHash<QString, QString> m_streams;
+    // Prepaid sessions to paid providers (per-session prepay). providerFp → the
+    // session's unique payment amount, the payTo balance baseline when we opened
+    // it, and whether the payment has settled on-chain yet.
+    struct PaySession { double amount = 0.0; double baseline = 0.0; bool ready = false; };
+    QHash<QString, PaySession> m_sessions;
     QString           m_payBackend;
+    QString           m_seq;                    // LEZ sequencer URL (LEZ_SEQUENCER)
+    LogosAPIClient*   m_walletClient = nullptr; // logos_wallet (makes the payment)
+    QTimer*           m_payTimer     = nullptr; // polls payTo until sessions fund
     bool              m_autoAudit   = false;   // opt-in (INFERENCE_AUTO_AUDIT); informational only
     bool              m_requireEncryption = false;
     qint64            m_timeoutMs = 90000;     // INFERENCE_TIMEOUT_MS override
