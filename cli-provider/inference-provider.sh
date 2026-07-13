@@ -161,7 +161,12 @@ while true; do
     seen="$(stat_field promptsSeen)"; sent="$(stat_field responsesSent)"
     if [[ "${seen:-}" =~ ^[0-9]+$ && "$seen" != "$last" ]]; then
         from="$(stat_field lastFrom)"; pid="$(stat_field lastPromptId)"
-        ok "prompts: $seen  ·  responses: ${sent:-0}  ·  last: ${pid:--} from ${from:--}"
+        earned="$(stat_field earned)"; sess="$(stat_field sessionsFunded)"
+        # Only show the earnings tail for paid (lez) nodes.
+        pay=""
+        [[ "${earned:-null}" != "null" && -n "${earned:-}" ]] \
+            && pay="  ·  💰 earned ${earned} LEZ across ${sess:-0} session(s)"
+        ok "prompts: $seen  ·  responses: ${sent:-0}  ·  last: ${pid:--} from ${from:--}${pay}"
         last="$seen"
     fi
     daemon_running || { warn "daemon went away"; break; }

@@ -593,6 +593,18 @@ QString ProviderPlugin::stats()
     o["inflight"]      = m_inflight;
     o["lastPromptId"]  = m_lastPromptId;
     o["lastFrom"]      = m_lastFrom;
+    // Earnings (paid providers) — what this node has been paid, from the local
+    // session ledger. Cheap: no RPC, just the in-memory confirmed totals.
+    if (m_access == "lez") {
+        int paidPrompts = 0;
+        for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it)
+            paidPrompts += it.value();
+        o["payTo"]             = m_payTo;
+        o["quotaPerSession"]   = m_quota;
+        o["earned"]            = m_confirmedTotal;   // Σ funded session amounts (LEZ)
+        o["sessionsFunded"]    = m_sessions.size();
+        o["paidPromptsServed"] = paidPrompts;
+    }
     return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
 }
 
