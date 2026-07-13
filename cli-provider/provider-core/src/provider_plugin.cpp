@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QFile>
 #include <QProcess>
 #include <QRandomGenerator>
 #include <QTimer>
@@ -191,6 +192,7 @@ bool ProviderPlugin::sessionEligible(const QJsonObject& cred)
             return false;
         }
         it.value()++;
+        persistSessions();
         return true;
     }
 
@@ -206,8 +208,47 @@ bool ProviderPlugin::sessionEligible(const QJsonObject& cred)
     }
     m_confirmedTotal += amount;
     m_sessions.insert(key, 1);
+    persistSessions();
     qInfo() << "ProviderPlugin: session" << key << "funded — unlocking" << m_quota << "prompts";
     return true;
+}
+
+// The paid-session ledger persists next to the node so a restart/redeploy
+// doesn't wipe funded sessions (which would burn users' prepaid quota).
+QString ProviderPlugin::sessionsPath() const
+{
+    const QString home = qEnvironmentVariable("HOME");
+    return (home.isEmpty() ? QStringLiteral("/tmp") : home)
+           + QStringLiteral("/.inference-provider-sessions.json");
+}
+
+void ProviderPlugin::persistSessions() const
+{
+    QJsonObject s;
+    for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it)
+        s[it.key()] = it.value();
+    const QJsonObject o{{"payTo", m_payTo}, {"startBalance", m_startBalance},
+                        {"confirmedTotal", m_confirmedTotal}, {"sessions", s}};
+    QFile f(sessionsPath());
+    if (f.open(QIODevice::WriteOnly))
+        f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+void ProviderPlugin::loadSessions()
+{
+    QFile f(sessionsPath());
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    // Only restore a ledger written for THIS payTo — a different account's
+    // history (or a reconfigured provider) must start clean.
+    if (o.value("payTo").toString() != m_payTo) return;
+    m_startBalance   = o.value("startBalance").toDouble(-1.0);
+    m_confirmedTotal = o.value("confirmedTotal").toDouble(0.0);
+    const QJsonObject s = o.value("sessions").toObject();
+    for (auto it = s.constBegin(); it != s.constEnd(); ++it)
+        m_sessions.insert(it.key(), it.value().toInt());
+    qInfo() << "ProviderPlugin: restored" << m_sessions.size() << "paid session(s), baseline"
+            << m_startBalance << "confirmedTotal" << m_confirmedTotal;
 }
 
 ProviderPlugin::~ProviderPlugin() = default;
@@ -366,12 +407,14 @@ bool ProviderPlugin::start(const QString& room)
     if (!invokeBool("start", "start")) return false;
     m_started = true;
 
-    // Baseline the pay account so only payments received AFTER we go live count
-    // toward sessions (paid prepay backend only).
+    // Restore any persisted paid sessions (same payTo); only baseline fresh when
+    // there's no saved ledger — so a restart doesn't wipe funded sessions.
     if (m_access == "lez" && m_payBackend == "lez" && !m_payToB58.isEmpty()) {
-        m_startBalance = seqBalance();
+        loadSessions();
+        if (m_startBalance < 0.0) m_startBalance = seqBalance();   // no ledger → fresh baseline
         qInfo() << "ProviderPlugin: prepay pay-to" << m_payToB58
-                << "baseline balance" << m_startBalance << "quota/session" << m_quota;
+                << "baseline balance" << m_startBalance << "quota/session" << m_quota
+                << "restored-sessions" << m_sessions.size();
     }
 
     if (!invokeBool("subscribe", "subscribe", topicForRoom(m_room))) return false;

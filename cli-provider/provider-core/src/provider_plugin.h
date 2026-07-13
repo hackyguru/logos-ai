@@ -63,6 +63,11 @@ private:
     // spent. Mutates session bookkeeping, so it's non-const.
     bool    sessionEligible(const QJsonObject& cred);
     double  seqBalance();          // m_payTo balance via sequencer RPC (-1 on error)
+    // Persist the paid-session ledger (baseline + confirmed sessions + quota
+    // used) so funded sessions survive a provider restart / redeploy.
+    QString sessionsPath() const;
+    void    loadSessions();
+    void    persistSessions() const;
     bool    invokeBool(const char* what, const QString& method,
                        const QVariant& arg = QVariant());
 
