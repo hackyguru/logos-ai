@@ -2,10 +2,12 @@
 #define PROVIDER_PLUGIN_H
 
 #include <QObject>
+#include <QMap>
 #include <QSet>
 #include <QString>
 #include <QTimer>
 #include <QVariant>
+class QJsonObject;
 #include "provider_interface.h"
 #include "inference_identity.h"
 #include "logos_api.h"
@@ -56,6 +58,11 @@ private:
                          const QString& text, const QString& model,
                          const QString& topic);
     bool    powValid(const QString& promptId, const QString& nonce) const;
+    // Per-session prepay: a prompt is served if its cred names a session whose
+    // one-time payment we've seen land on m_payTo and whose prompt quota isn't
+    // spent. Mutates session bookkeeping, so it's non-const.
+    bool    sessionEligible(const QJsonObject& cred);
+    double  seqBalance();          // m_payTo balance via sequencer RPC (-1 on error)
     bool    invokeBool(const char* what, const QString& method,
                        const QVariant& arg = QVariant());
 
@@ -63,8 +70,18 @@ private:
     QString          m_room;
     QString          m_model;       // default ollama model (first of m_models)
     QStringList      m_models;      // all models served (INFERENCE_MODELS csv)
-    QString          m_access;      // "open" | "pow" (INFERENCE_ACCESS)
+    QString          m_access;      // "open" | "pow" | "lez" (INFERENCE_ACCESS)
     int              m_powBits = 18;  // hashcash difficulty (INFERENCE_POW_BITS)
+    QString          m_payTo;       // provider LEZ PUBLIC account, hex (INFERENCE_PAY_TO)
+    QString          m_payToB58;    // m_payTo encoded base58 for the sequencer RPC
+    QString          m_seq;         // LEZ sequencer URL (LEZ_SEQUENCER)
+    double           m_rate = 1.0;  // stream draw, TokensPerSecond (INFERENCE_RATE)
+    QString          m_payBackend;  // "mock" | "lez" (INFERENCE_PAY_BACKEND)
+    // Per-session prepay bookkeeping (INFERENCE_PAY_BACKEND=lez).
+    int              m_quota = 10;          // prompts unlocked per paid session
+    double           m_startBalance = -1.0; // m_payTo balance when we went live
+    double           m_confirmedTotal = 0.0;// Σ amounts of confirmed sessions
+    QMap<QString,int> m_sessions;           // session amount(key) → prompts used
     double           m_priceAmount = 0.0;       // price per unit (0 = free)
     QString          m_priceUnit;               // "request" | "1ktokens"
     QString          m_priceAsset;              // LEZ asset id (empty until LEZ)

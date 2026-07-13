@@ -298,9 +298,11 @@ export default function Home() {
                           : <span style={{ color: "var(--status-warning)" }}>⚠ unverified</span>}
                       </td>
                       <td className="num" style={{ color: (p.priceAmount ?? 0) > 0 ? "var(--status-good)" : "var(--text-muted)" }}>
-                        {(p.priceAmount ?? 0) > 0
-                          ? `${p.priceAmount} / ${p.priceUnit === "1ktokens" ? "1k tok" : "req"}`
-                          : "free"}
+                        {p.access === "lez"
+                          ? `⚡ ${(p as unknown as {rate?:number}).rate ?? 0}/s`
+                          : (p.priceAmount ?? 0) > 0
+                            ? `${p.priceAmount} / ${p.priceUnit === "1ktokens" ? "1k tok" : "req"}`
+                            : "free"}
                       </td>
                       <td className="num">{p.cap > 0 ? `${Math.max(0, p.cap - p.load)}/${p.cap}` : "—"}</td>
                       <td className="num" style={{ whiteSpace: "nowrap", color: "var(--text-secondary)" }}>

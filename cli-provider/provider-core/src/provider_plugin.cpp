@@ -23,6 +23,30 @@ static const QString TOPIC_SUFFIX = "/json";
 // capability cards on, and every user browses — no shared room needed.
 static const QString DISCOVERY_TOPIC = "/inference/1/discovery/json";
 
+// Encode a hex account id as base58 (Bitcoin alphabet) — the form the LEZ
+// sequencer's getAccountBalance RPC expects. Empty in → empty out.
+static QString hexToB58(const QString& hex)
+{
+    const QByteArray bytes = QByteArray::fromHex(hex.toLatin1());
+    if (bytes.isEmpty()) return QString();
+    static const char* A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    int zeros = 0;
+    while (zeros < bytes.size() && bytes.at(zeros) == 0) ++zeros;
+    QList<int> digits;                                   // base58, little-endian
+    for (unsigned char byte : bytes) {
+        int carry = byte;
+        for (int i = 0; i < digits.size(); ++i) {
+            carry += digits[i] * 256;
+            digits[i] = carry % 58;
+            carry /= 58;
+        }
+        while (carry) { digits.append(carry % 58); carry /= 58; }
+    }
+    QString s(zeros, QLatin1Char('1'));
+    for (int i = digits.size() - 1; i >= 0; --i) s.append(QLatin1Char(A[digits[i]]));
+    return s;
+}
+
 ProviderPlugin::ProviderPlugin(QObject* parent)
     : QObject(parent)
     , m_id("cli-llm-" + QUuid::createUuid().toString(QUuid::WithoutBraces).left(4))
@@ -62,9 +86,31 @@ ProviderPlugin::ProviderPlugin(QObject* parent)
     // credential types (identity tiers, vouchers, RLN proofs, LEZ notes) slot
     // into the same `cred` field without another protocol change.
     m_access = qEnvironmentVariable("INFERENCE_ACCESS", "open").trimmed().toLower();
-    if (m_access != "pow") m_access = "open";
+    if (m_access != "pow" && m_access != "lez") m_access = "open";
     const int bits = qEnvironmentVariableIntValue("INFERENCE_POW_BITS");
     m_powBits = (bits >= 8 && bits <= 30) ? bits : 18;
+
+    // Incentivization (INFERENCE_ACCESS=lez): this node only answers prompts
+    // backed by an open LIP-155 payment stream to its LEZ account. payTo is the
+    // provider's LEZ account (advertised so clients open a stream to it); rate
+    // is the stream draw in TokensPerSecond. Verification/claims go through the
+    // PaymentBackend — a mock today (accepts a well-formed stream cred), the
+    // real payment_streams_module (loaded beside inference_provider) on Linux.
+    m_payTo = qEnvironmentVariable("INFERENCE_PAY_TO", "").trimmed().toLower();
+    m_rate  = qEnvironmentVariable("INFERENCE_RATE", "1").toDouble();
+    m_payBackend = qEnvironmentVariable("INFERENCE_PAY_BACKEND", "mock").trimmed().toLower();
+    // Per-session prepay: users pay a one-time amount to m_payTo (a PUBLIC LEZ
+    // account, provisioned once in Basecamp) which unlocks INFERENCE_QUOTA
+    // prompts. We only need to READ that account's balance, so the provider
+    // needs no LEZ module — just the sequencer's getAccountBalance RPC, which
+    // wants the id in base58.
+    const int q = qEnvironmentVariableIntValue("INFERENCE_QUOTA");
+    m_quota = q > 0 ? q : 10;
+    m_seq   = qEnvironmentVariable("LEZ_SEQUENCER", "https://testnet.lez.logos.co").trimmed();
+    m_payToB58 = hexToB58(m_payTo);
+    if (m_access == "lez" && m_payTo.isEmpty())
+        qWarning() << "ProviderPlugin: INFERENCE_ACCESS=lez but no INFERENCE_PAY_TO"
+                   << "— clients can't pay; set a PUBLIC LEZ account id (64 hex)";
 
     qDebug() << "ProviderPlugin: created, id =" << m_id
              << "model =" << m_model << "ollama =" << m_ollamaUrl
@@ -94,6 +140,74 @@ bool ProviderPlugin::powValid(const QString& promptId, const QString& nonce) con
     const QByteArray digest = QCryptographicHash::hash(
         (promptId + "|" + m_id + "|" + nonce).toUtf8(), QCryptographicHash::Sha256);
     return leadingZeroBits(digest) >= m_powBits;
+}
+
+// m_payTo's transparent balance, straight from the sequencer RPC (no LEZ
+// module needed — the provider only ever READS). -1 on any error.
+double ProviderPlugin::seqBalance()
+{
+    if (m_payToB58.isEmpty()) return -1.0;
+    QProcess p;
+    const QString body = QStringLiteral(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountBalance\",\"params\":[\"%1\"]}")
+        .arg(m_payToB58);
+    p.start("curl", {"-s", "-m", "10", "-X", "POST", m_seq,
+                     "-H", "content-type: application/json", "-d", body});
+    if (!p.waitForFinished(12000)) { p.kill(); return -1.0; }
+    const QJsonValue r = QJsonDocument::fromJson(p.readAllStandardOutput())
+                             .object().value("result");
+    return r.isDouble() ? r.toDouble() : -1.0;
+}
+
+// PaymentBackend seam — per-session prepay. A prompt is served if its cred names
+// a session (identified by its unique payment amount) that we've seen funded on
+// m_payTo, and whose prompt quota isn't spent.
+//
+// We can only read the running balance (the sequencer exposes no per-tx
+// history), so funding is confirmed by cumulative accounting: a new session is
+// funded once m_payTo has received at least Σ(already-confirmed amounts) + this
+// amount. Amounts are unique per session, so under light traffic this
+// attributes credit deterministically. Known v1 limits: a truly concurrent pair
+// of equal-value payments can't be told apart, and sessions don't survive a
+// provider restart (the received funds fold into the fresh baseline). The robust
+// upgrades are block-scanning deposits or a dedicated per-session sub-account.
+//
+// The mock backend (dev / macOS) skips the on-chain check so the paid flow runs
+// end to end without a funded LEZ account.
+bool ProviderPlugin::sessionEligible(const QJsonObject& cred)
+{
+    const QString key = cred.value("amount").toString();   // amount doubles as session id
+    bool okNum = false;
+    const double amount = key.toDouble(&okNum);
+    if (!okNum || amount <= 0.0) return false;
+
+    if (m_payBackend != "lez") return true;                // mock: any well-formed cred passes
+
+    // Already-confirmed session → gate on remaining quota.
+    auto it = m_sessions.find(key);
+    if (it != m_sessions.end()) {
+        if (it.value() >= m_quota) {
+            qDebug() << "ProviderPlugin: session" << key << "quota spent (" << m_quota << ")";
+            return false;
+        }
+        it.value()++;
+        return true;
+    }
+
+    // New session → confirm the one-time payment actually landed on m_payTo.
+    const double bal = seqBalance();
+    if (bal < 0.0) { qWarning() << "ProviderPlugin: can't read payTo balance — declining"; return false; }
+    if (m_startBalance < 0.0) m_startBalance = bal;        // late baseline if start() couldn't
+    const double received = bal - m_startBalance;
+    if (received + 1e-9 < m_confirmedTotal + amount) {
+        qDebug() << "ProviderPlugin: session" << key << "unfunded (received" << received
+                 << "need" << (m_confirmedTotal + amount) << ") — declining";
+        return false;
+    }
+    m_confirmedTotal += amount;
+    m_sessions.insert(key, 1);
+    qInfo() << "ProviderPlugin: session" << key << "funded — unlocking" << m_quota << "prompts";
+    return true;
 }
 
 ProviderPlugin::~ProviderPlugin() = default;
@@ -252,6 +366,14 @@ bool ProviderPlugin::start(const QString& room)
     if (!invokeBool("start", "start")) return false;
     m_started = true;
 
+    // Baseline the pay account so only payments received AFTER we go live count
+    // toward sessions (paid prepay backend only).
+    if (m_access == "lez" && m_payBackend == "lez" && !m_payToB58.isEmpty()) {
+        m_startBalance = seqBalance();
+        qInfo() << "ProviderPlugin: prepay pay-to" << m_payToB58
+                << "baseline balance" << m_startBalance << "quota/session" << m_quota;
+    }
+
     if (!invokeBool("subscribe", "subscribe", topicForRoom(m_room))) return false;
 
     // Marketplace: also serve on our own session topic (any user who discovers
@@ -359,12 +481,16 @@ void ProviderPlugin::sendCard(const QString& signPk, const QString& boxPk, int l
     //   amount — price per unit; unit — "request"|"1ktokens"; asset — LEZ id
     //   access — credential demand ("open"|"pow") + powbits when pow
     QJsonObject price;
-    price["scheme"] = m_priceAmount > 0.0 ? "lez" : "free";
+    // access=lez ⇒ incentivized: advertise the LEZ pay account + stream rate so
+    // clients open a LIP-155 stream to us; scheme flips to "lez".
+    const bool paid = (m_access == "lez");
+    price["scheme"] = (paid || m_priceAmount > 0.0) ? "lez" : "free";
     price["amount"] = m_priceAmount;
     price["unit"]   = m_priceUnit;
     price["asset"]  = m_priceAsset;
     price["access"] = m_access;
     if (m_access == "pow") price["powbits"] = m_powBits;
+    if (paid) { price["payTo"] = m_payTo; price["rate"] = m_rate; price["quota"] = m_quota; }
     const QString priceJson = QString::fromUtf8(
         QJsonDocument(price).toJson(QJsonDocument::Compact));
     const QString modelsCsv = m_models.join(',');
@@ -498,9 +624,10 @@ void ProviderPlugin::handleMessageReceived(const QVariantList& data)
                      << reqModel << "we don't serve — using" << m_model;
             reqModel.clear();
         }
-        // Credential seam: enforce this node's access policy. Today the only
-        // credential type is a hashcash stamp; tomorrow's types (identity,
-        // voucher, RLN proof, LEZ note) validate here too.
+        // Credential seam: enforce this node's access policy. "pow" = hashcash
+        // stamp; "lez" = an open LIP-155 payment stream to this provider
+        // (incentivized). Future types (identity, voucher, RLN proof) slot in
+        // the same way.
         if (m_access == "pow") {
             const QJsonObject cred = innerDoc.object().value("cred").toObject();
             if (cred.value("type").toString() != "pow" ||
@@ -508,6 +635,14 @@ void ProviderPlugin::handleMessageReceived(const QVariantList& data)
                 qDebug() << "ProviderPlugin: prompt" << id
                          << "has no valid pow stamp (" << m_powBits
                          << "bits required) — declining";
+                return;
+            }
+        } else if (m_access == "lez") {
+            const QJsonObject cred = innerDoc.object().value("cred").toObject();
+            if (cred.value("type").toString() != "lez-prepay" ||
+                !sessionEligible(cred)) {
+                qDebug() << "ProviderPlugin: prompt" << id
+                         << "has no funded prepaid session — declining";
                 return;
             }
         }
