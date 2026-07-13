@@ -29,6 +29,7 @@ Item {
     property string walletPrivBal: "…"      // shielded balance we pay from
     property string walletPubBal: "…"       // transparent balance
     property bool   walletBusy: false
+    property var    paySessions: []         // active prepaid sessions to providers
 
     // ── Logos bridge helpers ─────────────────────────────────────────
 
@@ -104,6 +105,10 @@ Item {
         try {
             providers = (typeof provRaw === "string") ? JSON.parse(provRaw) : provRaw
         } catch (e) { providers = [] }
+        const psRaw = unwrapRemote(callInf("paymentStatus", []), [])   // cheap in-memory call
+        try {
+            paySessions = (typeof psRaw === "string") ? JSON.parse(psRaw) : psRaw
+        } catch (e) { paySessions = [] }
         // Wallet queries are synchronous and heavy (lezAccounts walks every
         // account), so throttle them — every ~6s once open — to keep the 1s
         // refresh loop from blocking the UI thread.
@@ -325,6 +330,25 @@ Item {
                     text: walletBusy ? "…" : "Open wallet"
                     enabled: !walletBusy
                     onClicked: { callWallet("lezOpen", []); walletBusy = true }
+                }
+            }
+        }
+
+        // ── Live payment/session status — makes the paid flow legible ──
+        Repeater {
+            model: root.paySessions
+            delegate: Text {
+                Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 12
+                color: modelData.ready ? "#188038" : "#b26a00"
+                text: {
+                    var fp = String(modelData.provider).substring(0, 10) + "…"
+                    if (!modelData.ready)
+                        return "💳 paying " + fp + " · " + modelData.amount
+                               + " LEZ — settling on-chain (~1 min)"
+                               + (modelData.waiting > 0 ? "  ·  " + modelData.waiting + " prompt(s) queued" : "")
+                    var left = Math.max(0, (modelData.quota || 0) - (modelData.used || 0))
+                    return "💳 " + fp + " · session active · " + left + "/" + (modelData.quota || 0)
+                           + " prompts left · paid " + modelData.amount + " LEZ"
                 }
             }
         }

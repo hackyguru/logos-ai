@@ -117,6 +117,7 @@ public:
     Q_INVOKABLE bool    importAccount(const QString& mnemonic,
                                       const QString& passphrase) override;
     Q_INVOKABLE QString listProviders() override;
+    Q_INVOKABLE QString paymentStatus() override;
     Q_INVOKABLE bool    unlock(const QString& passphrase) override;
     Q_INVOKABLE bool    setRequireEncryption(bool required) override;
     Q_INVOKABLE bool    setPreferredProvider(const QString& fingerprint) override;

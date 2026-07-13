@@ -56,6 +56,10 @@ public:
     // next-best provider after a timeout (INFERENCE_TIMEOUT_MS, default 90s),
     // then marked failed.
     Q_INVOKABLE virtual QString listProviders() = 0;
+    // Active LEZ prepaid sessions to paid providers — so the UI can show what's
+    // being paid and how much quota is left. JSON array of
+    //   {provider, amount, ready, used, quota, waiting}
+    Q_INVOKABLE virtual QString paymentStatus() = 0;
 
     // Decrypt a passphrase-protected identity key file (identityStatus
     // reports locked:true until this succeeds).

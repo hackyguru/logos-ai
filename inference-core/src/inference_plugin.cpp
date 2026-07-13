@@ -1206,6 +1206,29 @@ void InferencePlugin::handleResponse(const QJsonObject& obj)
     }
 }
 
+// Active prepaid sessions — what we're paying / have paid, and quota left, so
+// the UI can make the paid flow legible instead of a silent park.
+QString InferencePlugin::paymentStatus()
+{
+    QJsonArray arr;
+    for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
+        const QString fp = it.key();
+        const auto pit = m_providers.constFind(fp);
+        int waiting = 0;
+        for (const PromptRec& r : m_prompts)
+            if (r.waitPay && r.payFp == fp && !r.answered && !r.failed) ++waiting;
+        arr.append(QJsonObject{
+            {"provider", fp},
+            {"amount", it.value().amount},
+            {"ready",  it.value().ready},
+            {"used",   it.value().used},
+            {"quota",  pit != m_providers.constEnd() ? pit->quota : 0},
+            {"waiting", waiting}
+        });
+    }
+    return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
+
 QString InferencePlugin::listProviders()
 {
     QJsonArray arr;
