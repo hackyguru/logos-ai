@@ -73,7 +73,13 @@ part13-ai-inference/
 │   ├── provider-core/     # the inference_provider module (runs ollama)
 │   ├── setup-modules.sh  inference-provider.sh  README.md
 └── docs/                  # BRIEF.md (design + protocol)  ·  RUN.md (build + run)
+                           # PAYMENTS.md (anonymous LEZ-paid inference)
 ```
+
+> **Paid inference:** the marketplace can require **anonymous LEZ payment** — the
+> user pays a provider from a *shielded* balance (per-session prepay), the
+> provider verifies the credit over RPC before serving. See
+> [docs/PAYMENTS.md](docs/PAYMENTS.md).
 
 ## Quick start
 
