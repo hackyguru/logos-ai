@@ -23,6 +23,13 @@ Item {
     property bool   trustedOnly: false      // whitelist enforcement
     property int    trustedCount: 0
 
+    // ── LEZ wallet (payment source for lez/paid providers) ───────────
+    property bool   walletHasWallet: false  // a wallet exists on disk
+    property bool   walletOpen: false       // LEZ side is open (can pay)
+    property string walletPrivBal: "…"      // shielded balance we pay from
+    property string walletPubBal: "…"       // transparent balance
+    property bool   walletBusy: false
+
     // ── Logos bridge helpers ─────────────────────────────────────────
 
     function callInf(method, args) {
@@ -31,6 +38,44 @@ Item {
             return null
         }
         return logos.callModule("inference", method, args)
+    }
+
+    // Paid providers are settled through the shared logos_wallet module, so we
+    // query it straight from here to show the balance the payment spends from
+    // (and to open it — otherwise a paid prompt silently can't pay).
+    function callWallet(method, args) {
+        if (typeof logos === "undefined" || !logos.callModule) return null
+        return logos.callModule("logos_wallet", method, args)
+    }
+    function walletParse(raw) {
+        var v = raw
+        for (var i = 0; i < 2 && typeof v === "string"; i++) { try { v = JSON.parse(v) } catch (e) { break } }
+        return (v && typeof v === "object") ? v : null
+    }
+    property bool walletLoaded: false        // logos_wallet module is present/loaded
+    function refreshWallet() {
+        const st = walletParse(callWallet("lezStatus", []))
+        walletLoaded = !!st
+        if (!st) return   // module not loaded yet — bar prompts to open the wallet app
+        walletHasWallet = !!st.hasWallet
+        walletOpen      = !!st.ready
+        walletBusy      = !!st.busy
+        // Auto-open a persisted wallet so paying just works (no separate app trip).
+        if (walletHasWallet && !walletOpen && !walletBusy) { callWallet("lezOpen", []); return }
+        if (!walletOpen) return
+        // Balance we can actually pay with = the TOTAL across every private
+        // account, not just the primary (the deshield auto-picks whichever
+        // account holds funds, so the primary being empty is irrelevant).
+        const acc = walletParse(callWallet("lezAccounts", []))
+        if (acc && acc.ok && Array.isArray(acc.accounts)) {
+            var priv = 0, pub = 0
+            for (var i = 0; i < acc.accounts.length; i++) {
+                var b = Number(acc.accounts[i].balance) || 0
+                if (acc.accounts[i].isPublic) pub += b; else priv += b
+            }
+            walletPrivBal = String(priv)
+            walletPubBal  = String(pub)
+        }
     }
 
     // Basecamp JSON-encodes every remote-method return, so a C++ QString arrives
@@ -59,7 +104,12 @@ Item {
         try {
             providers = (typeof provRaw === "string") ? JSON.parse(provRaw) : provRaw
         } catch (e) { providers = [] }
+        // Wallet queries are synchronous and heavy (lezAccounts walks every
+        // account), so throttle them — every ~6s once open — to keep the 1s
+        // refresh loop from blocking the UI thread.
+        if (_walletTick++ % 6 === 0) refreshWallet()
     }
+    property int _walletTick: 0
 
     function liveProviders() {
         var n = 0
@@ -234,6 +284,47 @@ Item {
                     if (deliveryStatus === 0) callInf("startDelivery", [])
                     else                      callInf("stopDelivery",  [])
                     refresh()
+                }
+            }
+        }
+
+        // ── LEZ wallet bar — the balance paid providers are settled from ──
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 40
+            radius: 8
+            color: walletOpen ? "#f0f7f0" : "#fff6e6"
+            border.color: walletOpen ? "#cfe6cf" : "#f0d58c"; border.width: 1
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12; anchors.rightMargin: 12
+                spacing: 12
+                Text { text: "👛 Wallet"; font.pixelSize: 13; font.weight: Font.DemiBold; color: "#333" }
+                Rectangle { width: 8; height: 8; radius: 4
+                    color: walletOpen ? "#188038" : (walletBusy ? "#b26a00" : "#c0392b") }
+                Text {
+                    visible: walletOpen
+                    text: "🔒 " + walletPrivBal + " private   ·   🌐 " + walletPubBal + " public"
+                    color: "#234a86"; font.pixelSize: 13
+                }
+                Text {
+                    visible: !walletOpen
+                    text: !walletLoaded ? "open the Logos Wallet app once to enable payments"
+                          : walletBusy ? "opening…"
+                          : walletHasWallet ? "closed — open it to pay paid providers"
+                          : "no wallet — open the Logos Wallet app to create one"
+                    color: "#7a5c00"; font.pixelSize: 12
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                    text: "prompts paid via logos_wallet (shielded)"
+                    color: "#9aa5b1"; font.pixelSize: 10
+                }
+                Button {
+                    visible: !walletOpen && walletHasWallet
+                    text: walletBusy ? "…" : "Open wallet"
+                    enabled: !walletBusy
+                    onClicked: { callWallet("lezOpen", []); walletBusy = true }
                 }
             }
         }

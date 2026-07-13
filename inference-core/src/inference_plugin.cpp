@@ -694,8 +694,12 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
     if (!rec.pin.isEmpty()) {
         const auto it = m_providers.constFind(rec.pin);
         const qint64 cutoff = nowMs() - PROVIDER_LIVE_MS;
+        // A provider we've PAID must remain the target across retries — we
+        // committed funds to it, so re-select it even if already tried. Other
+        // pins (canary audits) still honor the tried set.
+        const bool paidPin = m_sessions.contains(rec.pin) && m_sessions.value(rec.pin).ready;
         if (it != m_providers.constEnd() && it->lastSeenMs >= cutoff
-            && !rec.tried.contains(rec.pin)) {
+            && (paidPin || !rec.tried.contains(rec.pin))) {
             prov = &it.value();
             providerFp = rec.pin;
         }
@@ -753,6 +757,10 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
             cred["type"]   = "lez-prepay";
             cred["amount"] = amount;              // the unique amount = session id
             inner["cred"] = cred;
+            // We've paid this provider — pin so every retry re-seals to it (and
+            // never fails over to a free provider or plaintext).
+            rec.pin   = providerFp;
+            rec.payFp = providerFp;
         }
         const QByteArray sealed = InferenceIdentity::seal(
             prov->boxPk, QJsonDocument(inner).toJson(QJsonDocument::Compact));
@@ -774,6 +782,16 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
         }
     }
     if (!rec.sealed) {
+        // A prompt we've paid for must never go out in the clear — a paid
+        // provider rejects plaintext, so that would just burn the payment. Keep
+        // it pending (still pinned to the paid provider) for a sealed retry; the
+        // sweep re-dispatches it (e.g. once the provider is reachable again).
+        if (!rec.payFp.isEmpty() && m_sessions.contains(rec.payFp)) {
+            rec.lastSendMs = nowMs();   // restart the retry clock; don't send now
+            qDebug() << "InferencePlugin: paid prompt" << rec.id
+                     << "not sealed this pass — holding for a sealed retry to" << rec.payFp;
+            return true;
+        }
         if (m_requireEncryption) return false;   // never send in the clear
         // No verified provider heard from yet (or sealing failed): legacy
         // plaintext broadcast, so the demo still works against old providers.
