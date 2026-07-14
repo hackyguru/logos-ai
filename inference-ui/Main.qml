@@ -30,6 +30,8 @@ Item {
     property string walletPubBal: "…"       // transparent balance
     property bool   walletBusy: false
     property var    paySessions: []         // active prepaid sessions to providers
+    property var    payStartTick: ({})      // provider → tick when its proof started
+    property int    payTick: 0              // ~1s counter for the elapsed display
 
     // ── Logos bridge helpers ─────────────────────────────────────────
 
@@ -109,6 +111,15 @@ Item {
         try {
             paySessions = (typeof psRaw === "string") ? JSON.parse(psRaw) : psRaw
         } catch (e) { paySessions = [] }
+        // Track when each in-flight (not-yet-funded) payment's proof started, so
+        // we can show a live elapsed time while the zk proof generates.
+        var seen = {}
+        for (var i = 0; i < paySessions.length; i++) {
+            var f = paySessions[i].provider; seen[f] = true
+            if (!paySessions[i].ready && payStartTick[f] === undefined) payStartTick[f] = payTick
+            if (paySessions[i].ready) delete payStartTick[f]
+        }
+        for (var k in payStartTick) if (!seen[k]) delete payStartTick[k]
         // Wallet queries are synchronous and heavy (lezAccounts walks every
         // account), so throttle them — every ~6s once open — to keep the 1s
         // refresh loop from blocking the UI thread.
@@ -342,10 +353,15 @@ Item {
                 color: modelData.ready ? "#188038" : "#b26a00"
                 text: {
                     var fp = String(modelData.provider).substring(0, 10) + "…"
-                    if (!modelData.ready)
-                        return "💳 paying " + fp + " · " + modelData.amount
-                               + " LEZ — settling on-chain (~1 min)"
+                    if (!modelData.ready) {
+                        var st = root.payStartTick[modelData.provider]
+                        var el = (st !== undefined) ? Math.max(0, root.payTick - st) : 0
+                        var mm = Math.floor(el / 60), ss = el % 60
+                        var clk = mm + ":" + (ss < 10 ? "0" : "") + ss
+                        return "🔐 generating zk proof — paying " + fp + " · " + modelData.amount
+                               + " LEZ · " + clk + " elapsed (~1 min)"
                                + (modelData.waiting > 0 ? "  ·  " + modelData.waiting + " prompt(s) queued" : "")
+                    }
                     var left = Math.max(0, (modelData.quota || 0) - (modelData.used || 0))
                     return "💳 " + fp + " · session active · " + left + "/" + (modelData.quota || 0)
                            + " prompts left · paid " + modelData.amount + " LEZ"
@@ -945,7 +961,7 @@ Item {
         interval: 1000
         running: true
         repeat: true
-        onTriggered: refresh()
+        onTriggered: { root.payTick++; refresh() }
     }
 
     Component.onCompleted: refresh()
