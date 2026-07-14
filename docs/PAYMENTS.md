@@ -104,17 +104,45 @@ settling and the quota remaining.
 
 - **Only the Basecamp-bundled LEZ module can *write* to the hosted testnet.** Its
   program image IDs match the deployed ones; a source build's don't, so its
-  writes are silently dropped. This is why the *user* pays from Basecamp and the
-  *provider* only reads over RPC — and why "give Bob a CLI wallet" doesn't work.
-- **`payTo` is not yet a genuinely independent Bob.** In the current demo the
-  provider's account is one the *user's* wallet controls, so the money doesn't
-  truly leave Alice. A real transfer needs Bob running his own Basecamp wallet
-  (own seed) and pointing `INFERENCE_PAY_TO` at *his* account.
-- **Bilateral anonymity is not implemented** — the provider's account is public.
+  writes are silently dropped. This is why the *user* pays from Basecamp — and
+  why a provider on the CLI can only *read*, never spend, its earnings.
+- **`payTo` in the shipped (public) flow is not yet a genuinely independent Bob.**
+  The provider's public account is one the *user's* wallet controls, so the money
+  doesn't truly leave Alice. See the bilateral path below for the real fix.
 - **Amount-collision edge case.** Two *concurrent* payments of the *same* amount
   can't be told apart under the running-balance accounting. Negligible with wide
   amounts on a funded wallet; a robust fix is per-deposit attribution via the
   zonescan indexer API (adds a third-party dependency).
+
+## Bilateral anonymity (shielded provider) — proven feasible
+
+The shipped flow is *user*-anonymous (the provider's account is public so it can
+verify with a bare RPC read). Shielding the **provider** too — so neither party's
+money identity is visible, and Bob is a genuinely independent earner — was long
+assumed blocked by the build/reproducibility walls. **It isn't.** Verified
+2026-07 on the Oracle (x86_64-linux) node:
+
+- `logos_execution_zone` (**lez_core 0.3.0**) **builds** for `linux-amd64-dev`
+  (`nix build …#lgx`) — the risc0/zerokit wall did not block it.
+- It **loads** in the logoscore CLI beside `inference_provider`.
+- Bob creates his **own** wallet (own seed), a **private** account, and
+  `get_private_account_keys` → a shielded receiving address. All *local* key ops,
+  so the write-wall doesn't apply.
+- His node **syncs** the testnet (`sync_to_block` to tip) — which *is* the note
+  trial-decrypt machinery, so incoming shielded notes are detected by the same
+  path that already works.
+
+The write-wall only blocks *spending* (Bob withdrawing) — not *receiving*, which
+is all reads. So the remaining work is wiring, not a wall:
+
+1. Provider advertises its shielded receiving address (compact reference; the raw
+   keys are ~3 KB, too big for every capability card) and, on start, opens its
+   lez_core wallet + syncs.
+2. `sessionEligible` verifies by **note scan** (`sync_to_block` + `get_balance`
+   on the private account) instead of the public RPC read.
+3. The user pays with **`transfer_private`** to the provider's keys instead of
+   `deshield`, and releases the parked prompt when the transfer completes (Bob's
+   private balance isn't publicly pollable).
 
 ## Where it lives
 
