@@ -931,6 +931,7 @@ QString InferencePlugin::listExchanges()
         o["sealed"]   = p.sealed;
         o["failed"]   = p.failed;
         o["retries"]  = p.retries;
+        o["paying"]   = p.waitPay;   // parked while its payment's zk proof settles
         arr.append(o);
     }
     return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));

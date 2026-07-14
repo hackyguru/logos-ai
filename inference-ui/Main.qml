@@ -864,15 +864,21 @@ Item {
                         textFormat: Text.PlainText
                         font.pixelSize: 13
                         color: modelData.failed ? "#c5221f"
-                               : modelData.answered ? "#1f2d3d" : "#9a7700"
+                               : modelData.answered ? "#1f2d3d"
+                               : modelData.paying ? "#b26a00" : "#9a7700"
                         text: modelData.failed
                               ? "⚠  no provider answered — try again or pick another provider"
                               : modelData.answered
                                 ? ("🤖  " + (modelData.text && modelData.text.length > 0
                                             ? modelData.text : "(empty response)"))
-                                : ("🤖  thinking… " + Math.floor(modelData.ageMs / 1000) + "s"
-                                   + (modelData.retries > 0
-                                      ? "  (retry " + modelData.retries + ")" : ""))
+                                : modelData.paying
+                                  // Parked while the payment's zk proof settles — say so,
+                                  // don't pretend the model is "thinking".
+                                  ? ("🔐  generating zk proof for payment… "
+                                     + Math.floor(modelData.ageMs / 1000) + "s (~1 min)")
+                                  : ("🤖  thinking… " + Math.floor(modelData.ageMs / 1000) + "s"
+                                     + (modelData.retries > 0
+                                        ? "  (retry " + modelData.retries + ")" : ""))
                     }
 
                     // Footer: sealed · model · provider · latency
