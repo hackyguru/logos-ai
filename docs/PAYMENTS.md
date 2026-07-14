@@ -144,6 +144,26 @@ is all reads. So the remaining work is wiring, not a wall:
    `deshield`, and releases the parked prompt when the transfer completes (Bob's
    private balance isn't publicly pollable).
 
+## Deployment note — the inference UI must load the wallet stack
+
+Paid inference settles through `logos_wallet` (which drives
+`logos_execution_zone`). Those must be **loaded** when the AI Inference app
+opens, or the wallet bar's remote calls block on a replica that never appears
+("Timeout waiting for replica: logos_wallet") and freeze the whole Basecamp
+shell. So `inference_ui`'s **manifest** must list them as dependencies:
+
+```json
+"dependencies": ["logos_execution_zone", "logos_wallet", "inference"]
+```
+
+The wallet-bar queries are also issued asynchronously as a second line of
+defence, but the dependency is what actually prevents the stall (and removes the
+separate "open the Logos Wallet app" trip — the stack loads with the app). This
+isn't baked into `inference_ui`'s source `metadata.json` because `logos_wallet`
+lives in a separate tree (`logos-workshop`) and pinning a cross-repo flake input
+is brittle; add it to the installed manifest at deploy time (Basecamp bundles
+`logos_execution_zone`; install `logos_wallet` alongside).
+
 ## Where it lives
 
 - User: `inference-core/src/inference_plugin.cpp` — `ensureSession`,
