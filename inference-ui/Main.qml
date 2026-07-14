@@ -46,9 +46,12 @@ Item {
     // Paid providers are settled through the shared logos_wallet module, so we
     // query it straight from here to show the balance the payment spends from
     // (and to open it — otherwise a paid prompt silently can't pay).
-    function callWallet(method, args) {
-        if (typeof logos === "undefined" || !logos.callModule) return null
-        return logos.callModule("logos_wallet", method, args)
+    // ASYNC only. A synchronous callModule to logos_wallet blocks the QML thread
+    // when the module isn't loaded (e.g. AI Inference opened without the wallet
+    // app / easynode first) — which froze the whole UI. Async can never hang it.
+    function callWallet(method, args, cb) {
+        if (typeof logos === "undefined" || !logos.callModuleAsync) { if (cb) cb(null); return }
+        logos.callModuleAsync("logos_wallet", method, args, function(raw) { if (cb) cb(raw) })
     }
     function walletParse(raw) {
         var v = raw
@@ -57,28 +60,31 @@ Item {
     }
     property bool walletLoaded: false        // logos_wallet module is present/loaded
     function refreshWallet() {
-        const st = walletParse(callWallet("lezStatus", []))
-        walletLoaded = !!st
-        if (!st) return   // module not loaded yet — bar prompts to open the wallet app
-        walletHasWallet = !!st.hasWallet
-        walletOpen      = !!st.ready
-        walletBusy      = !!st.busy
-        // Auto-open a persisted wallet so paying just works (no separate app trip).
-        if (walletHasWallet && !walletOpen && !walletBusy) { callWallet("lezOpen", []); return }
-        if (!walletOpen) return
-        // Balance we can actually pay with = the TOTAL across every private
-        // account, not just the primary (the deshield auto-picks whichever
-        // account holds funds, so the primary being empty is irrelevant).
-        const acc = walletParse(callWallet("lezAccounts", []))
-        if (acc && acc.ok && Array.isArray(acc.accounts)) {
-            var priv = 0, pub = 0
-            for (var i = 0; i < acc.accounts.length; i++) {
-                var b = Number(acc.accounts[i].balance) || 0
-                if (acc.accounts[i].isPublic) pub += b; else priv += b
-            }
-            walletPrivBal = String(priv)
-            walletPubBal  = String(pub)
-        }
+        callWallet("lezStatus", [], function(raw) {
+            const st = walletParse(raw)
+            walletLoaded = !!st
+            if (!st) return   // module not loaded yet — bar prompts to open the wallet app
+            walletHasWallet = !!st.hasWallet
+            walletOpen      = !!st.ready
+            walletBusy      = !!st.busy
+            // Auto-open a persisted wallet so paying just works (no separate app trip).
+            if (walletHasWallet && !walletOpen && !walletBusy) { callWallet("lezOpen", [], null); return }
+            if (!walletOpen) return
+            // Balance we can pay with = the TOTAL across every private account
+            // (the deshield auto-picks whichever holds funds).
+            callWallet("lezAccounts", [], function(araw) {
+                const acc = walletParse(araw)
+                if (acc && acc.ok && Array.isArray(acc.accounts)) {
+                    var priv = 0, pub = 0
+                    for (var i = 0; i < acc.accounts.length; i++) {
+                        var b = Number(acc.accounts[i].balance) || 0
+                        if (acc.accounts[i].isPublic) pub += b; else priv += b
+                    }
+                    walletPrivBal = String(priv)
+                    walletPubBal  = String(pub)
+                }
+            })
+        })
     }
 
     // Basecamp JSON-encodes every remote-method return, so a C++ QString arrives
@@ -340,7 +346,7 @@ Item {
                     visible: !walletOpen && walletHasWallet
                     text: walletBusy ? "…" : "Open wallet"
                     enabled: !walletBusy
-                    onClicked: { callWallet("lezOpen", []); walletBusy = true }
+                    onClicked: { callWallet("lezOpen", [], null); walletBusy = true }
                 }
             }
         }
