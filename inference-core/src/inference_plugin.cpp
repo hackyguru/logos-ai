@@ -546,15 +546,32 @@ bool InferencePlugin::ensureSession(const QString& providerFp, const ProviderRec
 
     if (!m_walletClient) m_walletClient = logosAPI ? logosAPI->getClient("logos_wallet") : nullptr;
     if (!m_walletClient) {
-        qWarning() << "InferencePlugin: INFERENCE_PAY_BACKEND=lez but logos_wallet is"
-                   << "unavailable — can't pay" << providerFp;
+        m_payError = QStringLiteral("Open the Logos Wallet app to enable payments.");
+        qWarning() << "InferencePlugin: logos_wallet unavailable — can't pay" << providerFp;
         return false;
+    }
+    // The LEZ wallet must be OPEN before we fire a payment — otherwise the
+    // deshield silently fails (fire-and-forget) and the prompt parks for minutes.
+    // Check first and fail fast with a clear, actionable reason.
+    {
+        const QVariant sv = m_walletClient->invokeRemoteMethod(
+            "logos_wallet", "lezStatus", QVariantList{});
+        const QJsonObject st = QJsonDocument::fromJson(sv.toString().toUtf8()).object();
+        if (!st.value("ready").toBool()) {
+            m_payError = st.value("hasWallet").toBool()
+                ? QStringLiteral("Open your LEZ wallet (Logos Wallet app) to pay this provider.")
+                : QStringLiteral("Set up your LEZ wallet (Logos Wallet app) to pay this provider.");
+            qWarning() << "InferencePlugin: LEZ wallet not open — can't pay" << providerFp;
+            return false;
+        }
     }
     s.baseline = seqBalance(p.payTo);      // count only credit received from here on
     if (s.baseline < 0.0) {
+        m_payError = QStringLiteral("Can't reach the LEZ sequencer to verify payment — check the network.");
         qWarning() << "InferencePlugin: can't read payTo balance for" << providerFp << "— not paying";
         return false;
     }
+    m_payError.clear();
     // Fire the one-time payment: deshield from our (auto-picked) private account
     // to the provider's public account. Async — settles in ~a minute; pollPayments
     // flips the session ready once the credit shows up.
@@ -748,6 +765,15 @@ bool InferencePlugin::dispatchPrompt(PromptRec& rec)
                              << "payment settlement to" << providerFp;
                     return true;
                 }
+                // Couldn't even START paying (wallet not open, no funds, no
+                // sequencer) — fail fast with the actionable reason instead of
+                // silently degrading to a plaintext send a paid provider rejects.
+                if (!m_payError.isEmpty()) {
+                    rec.reason = m_payError;
+                    qWarning() << "InferencePlugin: paid prompt" << rec.id
+                               << "not sent —" << m_payError;
+                    return false;   // sendPrompt/sweep mark it failed, carrying rec.reason
+                }
                 qWarning() << "InferencePlugin: can't open a paid session to" << providerFp
                            << "— skipping provider";
                 rec.tried << providerFp;
@@ -932,6 +958,7 @@ QString InferencePlugin::listExchanges()
         o["failed"]   = p.failed;
         o["retries"]  = p.retries;
         o["paying"]   = p.waitPay;   // parked while its payment's zk proof settles
+        o["reason"]   = p.reason;    // failure reason (e.g. wallet not open)
         arr.append(o);
     }
     return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));

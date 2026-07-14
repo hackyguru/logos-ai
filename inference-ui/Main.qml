@@ -867,7 +867,9 @@ Item {
                                : modelData.answered ? "#1f2d3d"
                                : modelData.paying ? "#b26a00" : "#9a7700"
                         text: modelData.failed
-                              ? "⚠  no provider answered — try again or pick another provider"
+                              ? (modelData.reason && modelData.reason.length > 0
+                                 ? "⚠  " + modelData.reason
+                                 : "⚠  no provider answered — try again or pick another provider")
                               : modelData.answered
                                 ? ("🤖  " + (modelData.text && modelData.text.length > 0
                                             ? modelData.text : "(empty response)"))

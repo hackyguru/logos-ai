@@ -50,6 +50,7 @@ struct PromptRec {
     bool    waitPay    = false;
     QString payFp;             // provider we're paying for this prompt
     qint64  payStartMs = 0;    // when we began waiting (safety deadline)
+    QString reason;            // why it failed (e.g. wallet not open), for the UI
 };
 
 // A provider we've heard a (signature-verified) announce from — either in the
@@ -174,6 +175,7 @@ private:
     QHash<QString, PaySession> m_sessions;
     QString           m_payBackend;
     QString           m_seq;                    // LEZ sequencer URL (LEZ_SEQUENCER)
+    QString           m_payError;               // last "can't pay" reason (wallet not open, etc.)
     LogosAPIClient*   m_walletClient = nullptr; // logos_wallet (makes the payment)
     QTimer*           m_payTimer     = nullptr; // polls payTo until sessions fund
     bool              m_autoAudit   = false;   // opt-in (INFERENCE_AUTO_AUDIT); informational only
